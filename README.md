@@ -2,7 +2,7 @@ Wavesync
 ========
 
 The main goal is achieving perfectly synchronised multi-room playback over the local
-area networks (Ethernet or Wi-Fi) using cheap component little cables:
+area networks (Ethernet or Wi-Fi) using cheap components and no additional cables:
 
 - works as a network bridge between two PulseAudio instances,
 - suitable for your RaspberryPI with Kodi/Mopidy/some other player,
@@ -179,8 +179,11 @@ Tips
   But you're interested in the differences between the sinks, and not absolute
   values.
 
-3. It's easy to create an audio loop over the network. Don't be surprised if it
-   happens and fix your configuration.
+3. Why not use RTP pulseaudio module?
+
+  Well, try it. It didn't worked for me with unicast addresses at all -
+  hence, didn't worked over Wi-Fi. Also, from time to time it was losing
+  the sync even over the cable.
 
 4. How fast network do I need?
 
