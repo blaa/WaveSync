@@ -1,4 +1,3 @@
-
 Wavesync
 ========
 
@@ -7,6 +6,7 @@ area networks (Ethernet or Wi-Fi) using cheap component little cables:
 
 - works as a network bridge between two PulseAudio instances,
 - suitable for your RaspberryPI with Kodi/Mopidy/some other player,
+  although USB soundcard or HDMI output is recommended.
 - works over shaky wireless using cheap USB Wi-Fi adapters,
 - works with Debian Stable/Raspbian Python with no external dependencies,
 - works with multicast and unicast transmission,
@@ -14,7 +14,6 @@ area networks (Ethernet or Wi-Fi) using cheap component little cables:
 - requires NTP time synchronization,
 - increases audio latency, not suitable for gaming and requires A-V correction
   for movie playback.
-
 
 Configuration
 -------------
@@ -29,14 +28,14 @@ Configuration
 
   ```
   # ntpstat
-  synchronised to NTP server (x.y.z.w) at stratum 3 
+  synchronised to NTP server (x.y.z.w) at stratum 3
      time correct to within 31 ms
      polling server every 1024 s
   ```
 
   31ms should be fine. Anything over 100ms might cause problems. Crucial is the
   time on the receivers. < 20ms or better should be achievable within the LAN.
-  
+
 2. Configure PulseAudio UNIX socket source on sender. For example:
 
   ```
@@ -67,7 +66,7 @@ Configuration
 5. Run sender:
 
   ```
-  $ wavesync --tx /tmp/music.source 
+  $ wavesync --tx /tmp/music.source
   ```
 
 6. Run receivers:
@@ -78,7 +77,7 @@ Configuration
   ```
 
 7. Play music, fix your settings, try unicast in case of Wi-Fi, fine-tune
-   sink-latency, observe latency drifts, check if NTP still works. 
+   sink-latency, observe latency drifts, check if NTP still works.
 
 8. If you use this - drop me a note so I know it's useful. It might accidentally
    make me code something more or fix something. And I've got few ideas.
@@ -138,13 +137,13 @@ Packet format
 
 For a given medium maximal possible packets are transmitted. 80 bytes are
 subtracted from MTU to fit IP (assuming pessimistically large header) and UDP
-headers. 
+headers.
 
 Flags come `free' because a generic 2 channel, 16 bit audio requires 4
 bytes for 1 complete sample. Timemark is required and 1420-2=1418 doesn't
 divide by 4 - so we can transport 1416 bytes of sample data at once.
 
-Flags: 
+Flags:
 12345678ABCDEFGH
 Bit 1: 0 - not compressed, 1 - compressed
 Rest: Reserved :) A-H will probably extend timemark to cover one hour.
@@ -158,21 +157,25 @@ Tips
   It doesn't work for me at all with my USB dongle. Instead I trasmit to a
   multicast group for cable receivers and additionally to a unicast IP to reach
   Wi-Fi device with two options: --ip 224.0.0.56 --ip 192.168.1.10
-  
+
   Make sure your unicast receiver doesn't get two streams instead of one.
 
-2. How do I set sink-latency? 
+2. How do I set sink-latency?
 
   If one device lags behind other ones - increase it's sink-latency until you're
   fine with it. It's worse if the sink latency changes over time. You can get an
   estimate from the PulseAudio debug output. For e.g.:
 
-    (...)Using 1.0 fragments of size 65536 bytes (371.52ms), 
-    buffer size is 65536 bytes (371.52ms)
-    
-    Using 4.0 fragments of size 4408 bytes (24.99ms), buffer size is 17632 bytes
-    (99.95ms)
-    
+  ```
+  (...)Using 1.0 fragments of size 65536 bytes (371.52ms),
+  buffer size is 65536 bytes (371.52ms)
+
+  Using 4.0 fragments of size 4408 bytes (24.99ms), buffer size is 17632 bytes
+  (99.95ms)
+  
+  protocol-native.c: Final latency 200.00 ms = 90.00 ms + 2*10.00 ms + 90.00 ms
+  ```
+  
   But you're interested in the differences between the sinks, and not absolute
   values.
 
@@ -184,7 +187,7 @@ Tips
   For 2 channel, 16bit sample, 44100Hz rate, 1500B (usual) network MTU the
   generated stream is around 125 packets per second - doesn't exceed 1.5Mbit/s.
   Each additional unicast receiver (--ip option) will multiply this result.
-  
+
   Using compression will increase CPU usage and might reduce the size of
   packets. Won't reduce their number. Might help you in some cases but it's
   there for experiments.
@@ -192,16 +195,33 @@ Tips
 5. You should probably use rtkit and make PA and probably this code realtime as
    much as possible. Didn't tried it yet.
 
+   In daemon.conf try:
+   ```
+   realtime-scheduling = yes
+   realtime-priority = 5
+   ```
+   And check debug output to see if it works.
+
 6. Packets currently are not reordered. If the network mangles the order of the
    packets - it won't work. On LAN it should be OK. If needed it's a certain
    item for a TODO list.
 
-7. Nothing works!
+7. RaspberryPI onboard sound card
+
+  It's not very good. It should work though after some tweaking.
+  Sink-latency can reach 1000ms for it and because of huge buffering tends
+  to "drift" over time.
+  
+  Try setting tsched=0 and decreasing number of default-fragments and their
+  size in daemon.conf. Try:
+  ```echo performance | tee /sys/devices/system/cpu/*/cpufreq/scaling_governor```
+
+8. Nothing works!
 
   Check your firewall it might be dropping your packets. Check using tcpdump if
   the packets are reaching the receiver. Try unicast instead of multicast. If
   using multicast check ``ip maddr`` to see if shows your multicast group.
 
-8. Still is not perfectly synced!
+9. Still is not perfectly synced!
 
   Try flooding your home with water to increase the speed of sound.

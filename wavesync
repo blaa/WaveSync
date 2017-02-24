@@ -14,7 +14,6 @@ UDP packets
   --- chunk_list ---> [Receiver.pump_audio]
 ---> Unix socket/sound sink
 """
-
 from time import time
 import struct
 import zlib
@@ -25,6 +24,8 @@ import asyncio
 from functools import partial
 
 from collections import deque
+
+VERSION=(0, 1, 1)
 
 class TimeMachine:
     """
@@ -115,7 +116,7 @@ class SampleReader(asyncio.Protocol):
 
 
         # Warning - might happen on slow UDP output sink
-        if self.sample_queue.qsize() > 20:
+        if self.sample_queue.qsize() > 30:
             print("System too slow; unable to send UDP packets fast enough!")
 
     def connection_lost(self, exc):
@@ -275,7 +276,7 @@ class Receiver(asyncio.DatagramProtocol):
         else:
             try:
                 o = int(octets[0])
-                if not (o >= 239 and o <= 224):
+                if not (o >= 224 and o <= 239):
                     multicast = False
             except ValueError:
                 multicast = False
@@ -320,8 +321,10 @@ class Receiver(asyncio.DatagramProtocol):
     def pump_audio(self, pulse_socket):
 
         # Self-tuning scheduling latency
-        sched_latency = 0.0
+        sched_latency = 0.001
         cnt = 0
+        drops = 0
+        total_delay = 0
 
         conn = yield from asyncio.open_unix_connection(pulse_socket)
         pulse_reader, pulse_writer = conn
@@ -335,30 +338,52 @@ class Receiver(asyncio.DatagramProtocol):
             item = self.chunk_list.popleft()
             mark, chunk = item
 
+            desired_time = mark - self.sink_latency
+
             # 0) We got the next chunk to be played
             cnt += 1
             now = datetime.utcnow().timestamp()
-            delay = mark - now - self.sink_latency - sched_latency
-            #print("Got chunk played in %.4f" % delay)
+            delay = desired_time - now
+
+            total_delay += delay
 
             # 1) Is it too much in the past? Drop it!
             if delay < -self.tolerance:
-                print("Dropping because delay=%.3f" % delay)
+                s = "Drop - falling behind: delay=%.3fms <= %.3fms"
+                s = s % (delay*1000, -self.tolerance*1000)
+                print(s)
+                drops += 1
                 continue
 
             # 2) Is it too much in the future? Wait for it!
-            if delay > self.tolerance:
+            if delay > 3 * sched_latency:
                 #print("Waiting for it, delay=%.3f sched_latency=%.6f" % (
                 #    delay, sched_latency)
                 #)
-                yield from asyncio.sleep(delay)
+                # Wait until we reach tolerated range
+                yield from asyncio.sleep(delay - sched_latency)
                 # Update scheduling latency every X times
-                if cnt % 10 == 0:
+
+                if cnt % 15 == 0:
+                    # Calculate the "overshoot"
                     new_now = datetime.utcnow().timestamp()
-                    new_delay = mark - new_now - self.sink_latency
-                    sched_latency *= 2
-                    sched_latency -= new_delay
-                    sched_latency /= 3
+                    jump_error = new_now - desired_time
+
+                    # jump_error > 0 - we overshoot
+                    # jump_error < 0 - we are early
+                    orig = sched_latency
+
+                    # Correct overshoot more eagerly than being early
+                    if jump_error > 0:
+                        sched_latency += jump_error
+                    else:
+                        sched_latency += jump_error / 4
+
+                    #print("sl=%.6f - je=%.6f - sl_now=%.6f" % (orig, jump_error, sched_latency))
+
+                    if sched_latency > self.tolerance:
+                        print("sched_latency too high")
+                        sched_latency = self.tolerance
                     #print("new_delay=%.4f updated sched_latency=%.6f " % (
                     #    new_delay, sched_latency)
                     #)
@@ -375,9 +400,11 @@ class Receiver(asyncio.DatagramProtocol):
 
             # Main status line
             if cnt % 50 == 0:
-                s = "STATE: Chunk queue=%-3d sched_latency=%8.6f" % (
+                s = "STATE: queue=%-3d sched_latency=%5.2fms avg_delay=%6.2fms drops=%d" % (
                     len(self.chunk_list),
-                    sched_latency,
+                    1000.0 * sched_latency,
+                    1000.0 * total_delay/cnt,
+                    drops
                 )
                 print(s)
 
@@ -385,7 +412,10 @@ class Receiver(asyncio.DatagramProtocol):
 def _parse_arguments():
     "Parse program arguments"
     import argparse
-    dst="Multi-room sound synchronization system"
+
+    version = ".".join(str(p) for p in VERSION)
+    dst="WaveSync %s - multi-room sound synchronization system"
+    dst = dst % version
     p = argparse.ArgumentParser(description=dst)
     snd = p.add_argument_group('sender options')
     rcv = p.add_argument_group('receiver options')
@@ -446,7 +476,8 @@ def _parse_arguments():
                      dest='tolerance_msec',
                      metavar="MSEC",
                      action="store",
-                     default=10,
+                     type=int,
+                     default=5,
                      help="error tolerance")
 
     rcv.add_argument("--sink-latency",
