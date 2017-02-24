@@ -27,28 +27,34 @@ Configuration
 
 1. Make sure NTP works correctly by calling ntpstat or ntptime:
 
-    # ntpstat
-    synchronised to NTP server (x.y.z.w) at stratum 3 
-       time correct to within 31 ms
-       polling server every 1024 s
+  ```
+  # ntpstat
+  synchronised to NTP server (x.y.z.w) at stratum 3 
+     time correct to within 31 ms
+     polling server every 1024 s
+  ```
 
   31ms should be fine. Anything over 100ms might cause problems. Crucial is the
   time on the receivers. < 20ms or better should be achievable within the LAN.
   
 2. Configure PulseAudio UNIX socket source on sender. For example:
-   
-    $ mkdir ~/.pulse; cd ~/.pulse
-    $ cp /etc/pulse/default.pa .
-    $ echo 'load-module module-simple-protocol-unix rate=44100 \
-            format=s16le channels=2 record=true \
-            source=0 socket=/tmp/music.source' >> default.pa
+
+  ```
+  $ mkdir ~/.pulse; cd ~/.pulse
+  $ cp /etc/pulse/default.pa .
+  $ echo 'load-module module-simple-protocol-unix rate=44100 \
+          format=s16le channels=2 record=true \
+          source=0 socket=/tmp/music.source' >> default.pa
+  ```
 
 3. Configure PulseAudio UNIX socket sink on receivers. For example:
 
-    $ echo 'load-module module-simple-protocol-unix rate=44100 \
-            format=s16le channels=2 playback=true sink=0 \
-            socket=/tmp/music.sink' >> ~/.pulse/default.pa
-           
+  ```
+  $ echo 'load-module module-simple-protocol-unix rate=44100 \
+          format=s16le channels=2 playback=true sink=0 \
+          socket=/tmp/music.sink' >> ~/.pulse/default.pa
+  ```
+
   In both cases you can use /etc/pulse/default.pa, or system.pa if using
   PulseAudio in system mode. My sender is also a transmitter - I use two PA
   there, one on a user running a Mopidy which creates the unix source, and the
@@ -59,13 +65,17 @@ Configuration
 4. Install wavesync with git clone or pip3 install.
 
 5. Run sender:
-  
-    $ wavesync --tx /tmp/music.source 
+
+  ```
+  $ wavesync --tx /tmp/music.source 
+  ```
 
 6. Run receivers:
 
-    rpi-rx1 $ wavesync --rx /tmp/music.sink --sink-latency 80
-    rpi-rx2 $ wavesync --rx /tmp/music.sink --sink-latency 60
+  ```
+  rpi-rx1 $ wavesync --rx /tmp/music.sink --sink-latency 80
+  rpi-rx2 $ wavesync --rx /tmp/music.sink --sink-latency 60
+  ```
 
 7. Play music, fix your settings, try unicast in case of Wi-Fi, fine-tune
    sink-latency, observe latency drifts, check if NTP still works. 
@@ -121,8 +131,10 @@ and puts somewhere else into some other unix pipes in a synchronised way.
 Packet format
 -------------
 
-    Byte:  [1 - 2][3   -   4][5         -       1420]
-    Label: [Flags][Time Mark][RAW or compressed data]
+```
+  Byte:  [1 - 2][3   -   4][5         -       1420]
+  Label: [Flags][Time Mark][RAW or compressed data]
+```
 
 For a given medium maximal possible packets are transmitted. 80 bytes are
 subtracted from MTU to fit IP (assuming pessimistically large header) and UDP
