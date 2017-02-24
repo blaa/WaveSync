@@ -1,0 +1,7 @@
+*.pyc
+*.pyo
+.#*
+ENV
+__pycache__
+build/
+dist/

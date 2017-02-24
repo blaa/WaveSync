@@ -1,0 +1,38 @@
+Random project Notes
+
+* TODOs
+** Handle errors which should cause event loop to stop.
+** Expand timemark from 2-byte to 3-bytes to cover whole hour
+   Use it for warnings if the time seems out of acceptable range (anything over
+   1 minute will be unacceptable)
+** Add additional frame type with a sender absolute time to do a time sanity check
+** Implement packet reordering upon arrival
+
+
+* Current timemark format
+** Create timemark:
+  now = current absolute UTC time
+  mark = now + latency # Move by latency into the future.
+  Now from the absolute time: 2017.02.23 23:14:29.123456:
+  Take only seconds and milliseconds (µseconds / 1000)
+  - Take seconds: 29
+  - shift them: 29000
+  - add miliseconds: 29123
+  This gives range from 0 to 59999 and fits 16 bits.
+
+  Upon reception we might have:
+
+  ------|minute start|-------|now|------|minute end|-------
+                                     ^ - TIME MARK WITHIN MINUTE
+
+  Case 1: it falls later within current minute. Assume it's the same minute,
+  just later and create an absolute time based on current and timemark.
+
+  --|m start|----|now|----|m end,m+1 start|----
+               ^ - TIME MARK WITHIN MINUTE
+
+  Case 2: falls before current time within current minute.
+  Assume it's in fact happening in the next minute:
+
+  --|m start|----|now|----|m end,m+1 start|----|m+1 ends|
+                                             ^ - ABSOLUTE HERE
