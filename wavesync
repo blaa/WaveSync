@@ -592,8 +592,10 @@ class Player:
                     self.receiver.stat_network_drops
                 )
                 print(s)
-                if self.receiver.stat_network_latency > 5:
+                if self.receiver.stat_network_latency > 4:
                     print("WARNING: Your network latency seems HUGE. Are the clocks synchronized?")
+                elif self.receiver.stat_network_latency < 0:
+                    print("WARNING: You either exceeded the speed of light or have unsynchronised clocks")
 
 
 def _parse_arguments():
@@ -652,6 +654,7 @@ def _parse_arguments():
     snd.add_argument("--compress",
                      action="store",
                      default=False,
+                     type=int,
                      help="compression level (1-9))")
 
     snd.add_argument("--no-loop",

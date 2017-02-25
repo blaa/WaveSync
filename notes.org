@@ -2,14 +2,25 @@ Random project Notes
 
 * TODOs
 ** TODO Handle errors which should cause event loop to stop.
-** TODO Expand timemark from 2-byte to 3-bytes to cover whole hour
-   Use it for warnings if the time seems out of acceptable range (anything over
-   1 minute will be unacceptable)
-** TODO Add additional frame type with a sender absolute time to do a time sanity check
+** TODO Idea: Initial output buffer pre-fill to even-out latency
 ** TODO Implement packet reordering upon arrival
+   Still doesn't seem needed over my crazy LAN. Will wait for requests.
 ** TODO Add check for chunk table overflow to fix memleak if pulseaudio hangs
-   Happens on native rpi audio card
-** TODO Initial output buffer pre-fill to even-out latency
+   Happens on a native rpi audio card.
+** TODO Idea: Insert silence every n-th chunk to make it less noticable
+   Or duplicate original chunks with certain properties
+** TODO Queue getting empty case seems to need a closer look 
+** DONE Add additional frame type with a sender absolute time to do a time sanity check
+   CLOSED: [2017-02-25 Sat 23:09]
+   Sanity check added and also fixed sync problem on packet loss
+
+** CANCELLED Expand timemark from 2-byte to 3-bytes to cover whole hour
+   CLOSED: [2017-02-25 Sat 23:08]
+   Use it for warnings if the time seems out of acceptable range (anything over
+   1 minute will be unacceptable).
+
+   Doesn't seem so important and warning are now implemented using STATUS frames
+   which also handles other problems.
 
 * Current timemark format
 ** Create timemark:
@@ -22,7 +33,7 @@ Random project Notes
   - add miliseconds: 29123
   This gives range from 0 to 59999 and fits 16 bits.
 
-  Upon reception we might have:
+** Upon reception we might have:
 
   ------|minute start|-------|now|------|minute end|-------
                                      ^ - TIME MARK WITHIN MINUTE
@@ -38,3 +49,5 @@ Random project Notes
 
   --|m start|----|now|----|m end,m+1 start|----|m+1 ends|
                                              ^ - ABSOLUTE HERE
+                                             
+  This two cases allow to reassemble the absolute time.                                             
