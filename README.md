@@ -145,8 +145,16 @@ divide by 4 - so we can transport 1416 bytes of sample data at once.
 
 Flags:
 12345678ABCDEFGH
-Bit 1: 0 - not compressed, 1 - compressed
-Rest: Reserved :) A-H will probably extend timemark to cover one hour.
+
+- Bit 1: 0 - not compressed, 1 - compressed
+- Bit 2: 1 - Status frame with no audio. 
+
+  ```
+  Byte:  [3      -      11][12      -      16]
+  Label: [Sender Timestamp][Total chunks sent]
+  ```           
+
+- Rest: Reserved :) A-H will probably extend timemark to cover one hour.
 
 
 Tips

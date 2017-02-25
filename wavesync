@@ -409,12 +409,25 @@ class Receiver(asyncio.DatagramProtocol):
 
             total_delay += delay
 
-            # 1) Is it too much in the past? Drop it!
+            # 1) We are falling behind and need to drop something to get back
+            # on track. Our output has some buffer too and dropping just few
+            # frames might not fix the sync. We need to flush the buffers of
+            # the output by waiting longer. At least `tolerance` time,
+            # but maybe tolerance + sink_latency.
             if delay < -self.tolerance:
-                s = "Drop - falling behind: delay=%.3fms <= %.3fms"
+                s = "Falling behind - resync: delay=%.3fms <= %.3fms"
                 s = s % (delay*1000, -self.tolerance*1000)
                 print(s)
                 drops += 1
+                # Time we will return to playback
+                back_on = now + self.tolerance + self.sink_latency / 2
+                while self.chunk_list:
+                    mark, chunk = self.chunk_list.popleft()
+                    desired_time = mark - self.sink_latency
+                    if desired_time < back_on:
+                        drops += 1
+                    else:
+                        break
                 continue
 
             # 2) Is it too much in the future? Wait for it!
@@ -458,12 +471,12 @@ class Receiver(asyncio.DatagramProtocol):
                 yield from pulse_writer.drain()
                 took = time() - start
                 if took > self.tolerance:
-                    print("Output pipe seems slow!")
+                    print("WARNING: Output pipe seems slow! Drain took %.3fms" % (took * 1000))
 
             # Main status line
             if cnt % 50 == 0:
                 s = ("STATUS: queue=%-3d latency[ms]: sched=%-4.1f net=%-5.1f "
-                     "avg_delay=%-4.2f drops: time=%d net=%d")
+                     "avg_delay=%-5.2f drops: time=%d net=%d")
                 s = s % (
                     len(self.chunk_list),
                     1000.0 * sched_latency,
@@ -550,7 +563,7 @@ def _parse_arguments():
                      metavar="MSEC",
                      action="store",
                      type=int,
-                     default=5,
+                     default=10,
                      help="error tolerance")
 
     rcv.add_argument("--sink-latency",
