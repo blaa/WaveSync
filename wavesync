@@ -266,15 +266,10 @@ class Receiver(asyncio.DatagramProtocol):
     - Receive packets
     - decode headers
     - store in chunk list.
-    - pump_audio coroutine  reads chunk from the list and feeds into Unix
-      socket into PulseAudio.
     """
-    def __init__(self, time_machine, channel, tolerance, sink_latency):
+    def __init__(self, time_machine, channel):
         # Store config
         self.channel = channel
-
-        self.tolerance = tolerance
-        self.sink_latency = sink_latency
 
         self.time_machine = time_machine
 
@@ -379,25 +374,70 @@ class Receiver(asyncio.DatagramProtocol):
         loop = asyncio.get_event_loop()
         loop.stop()
 
+class Player:
+    "Play received audio and keep sync"
+
+    def __init__(self, receiver, output_socket,
+                 tolerance, sink_latency):
+
+        self.receiver = receiver
+
+        self.tolerance = tolerance
+        self.sink_latency = sink_latency
+
+        self.output_socket = output_socket
+
+        self.stat_drops = 0
+        self.stat_total_delay = 0
+
+        # Generate silence frames (zeroed) of appropriate sizes for chunks
+        self.silence_cache = {}
+
+    def get_silent_chunk(self, base_chunk):
+        "Generate and cache silent chunks"
+        size = len(base_chunk)
+
+        silent_chunk = self.silence_cache.get(size, None)
+
+        if silent_chunk is not None:
+            return silent_chunk
+
+        silent_chunk = b'\x00' * size
+        self.silence_cache[size] = silent_chunk
+        return silent_chunk
+
+    def flush_output(self):
+        # Time we will return to playback
+        back_on = now + self.tolerance + self.sink_latency / 2
+        while self.receiver.chunk_list:
+            mark, chunk = self.receiver.chunk_list.popleft()
+            desired_time = mark - self.sink_latency
+            if desired_time < back_on:
+                self.stat_drops += 1
+            else:
+                break
+
+
     @asyncio.coroutine
-    def pump_audio(self, pulse_socket):
+    def pump_audio(self):
+        "Reads asynchronously chunks from the list and feeds into Unix socket"
 
         # Self-tuning scheduling latency
         sched_latency = 0.001
         cnt = 0
-        drops = 0
-        total_delay = 0
 
-        conn = yield from asyncio.open_unix_connection(pulse_socket)
+        # Connect to unix socket
+        conn = yield from asyncio.open_unix_connection(self.output_socket)
         pulse_reader, pulse_writer = conn
+
         while True:
-            if len(self.chunk_list) == 0:
-                self.chunk_available.clear()
+            if len(self.receiver.chunk_list) == 0:
+                self.receiver.chunk_available.clear()
                 print("Queue empty, waiting for initial data...")
-                yield from self.chunk_available.wait()
+                yield from self.receiver.chunk_available.wait()
                 continue
 
-            item = self.chunk_list.popleft()
+            item = self.receiver.chunk_list.popleft()
             mark, chunk = item
 
             desired_time = mark - self.sink_latency
@@ -407,7 +447,7 @@ class Receiver(asyncio.DatagramProtocol):
             now = datetime.utcnow().timestamp()
             delay = desired_time - now
 
-            total_delay += delay
+            self.stat_total_delay += delay
 
             # 1) We are falling behind and need to drop something to get back
             # on track. Our output has some buffer too and dropping just few
@@ -418,16 +458,7 @@ class Receiver(asyncio.DatagramProtocol):
                 s = "Falling behind - resync: delay=%.3fms <= %.3fms"
                 s = s % (delay*1000, -self.tolerance*1000)
                 print(s)
-                drops += 1
-                # Time we will return to playback
-                back_on = now + self.tolerance + self.sink_latency / 2
-                while self.chunk_list:
-                    mark, chunk = self.chunk_list.popleft()
-                    desired_time = mark - self.sink_latency
-                    if desired_time < back_on:
-                        drops += 1
-                    else:
-                        break
+                self.stat_drops += 1
                 continue
 
             # 2) Is it too much in the future? Wait for it!
@@ -478,15 +509,15 @@ class Receiver(asyncio.DatagramProtocol):
                 s = ("STATUS: queue=%-3d latency[ms]: sched=%-4.1f net=%-5.1f "
                      "avg_delay=%-5.2f drops: time=%d net=%d")
                 s = s % (
-                    len(self.chunk_list),
+                    len(self.receiver.chunk_list),
                     1000.0 * sched_latency,
-                    1000.0 * self.stat_network_latency,
-                    1000.0 * total_delay/cnt,
-                    drops,
-                    self.stat_network_drops
+                    1000.0 * self.receiver.stat_network_latency,
+                    1000.0 * self.stat_total_delay/cnt,
+                    self.stat_drops,
+                    self.receiver.stat_network_drops
                 )
                 print(s)
-                if self.stat_network_latency > 5:
+                if self.receiver.stat_network_latency > 5:
                     print("WARNING: Your network latency seems HUGE. Are the clocks synchronized?")
 
 
@@ -649,16 +680,19 @@ def start_rx(args, loop, time_machine):
     # Network receiver with it's connection
     channel = args.ip_list[0]
     receiver = Receiver(time_machine,
-                        channel=channel,
-                        tolerance=args.tolerance_msec / 1000.0,
-                        sink_latency=args.sink_latency_msec / 1000.0)
+                        channel=channel)
 
     connection = loop.create_datagram_endpoint(lambda: receiver,
                                                family=socket.AF_INET,
                                                local_addr=channel)
 
     # Corouting pumping audio into PA
-    pump = receiver.pump_audio(pulse_socket=args.rx)
+    player = Player(receiver,
+                    output_socket=args.rx,
+                    tolerance=args.tolerance_msec / 1000.0,
+                    sink_latency=args.sink_latency_msec / 1000.0)
+
+    pump = player.pump_audio()
 
     asyncio.async(connection)
     asyncio.async(pump)
