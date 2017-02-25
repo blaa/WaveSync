@@ -6,7 +6,7 @@ Sender pipeline:
 Unix socket/sound source
   --- samples stream ---> [Sample Reader]
   ---  sample_queue  ---> [Packetizer]
----> Uni/Multicast UDP 
+---> Uni/Multicast UDP
 
 Receiver pipeline:
 UDP packets
@@ -25,7 +25,7 @@ from functools import partial
 
 from collections import deque
 
-VERSION=(0, 1, 1)
+VERSION=(0, 2, 0)
 
 class TimeMachine:
     """
@@ -117,7 +117,9 @@ class SampleReader(asyncio.Protocol):
 
         # Warning - might happen on slow UDP output sink
         if self.sample_queue.qsize() > 30:
-            print("System too slow; unable to send UDP packets fast enough!")
+            s = "WARNING: Samples in queue: %d - slow UDP transmission!"
+            s = s % self.sample_queue.qsize()
+            print(s)
 
     def connection_lost(self, exc):
         print("The pulse was lost. I should go.")
@@ -128,13 +130,17 @@ class SampleReader(asyncio.Protocol):
 class Packetizer:
     """Read chunks from queue, add timestamp marks and send over multicast."""
 
+    HEADER_COMPRESSED_AUDIO = b'\x80\x00'
+    HEADER_RAW_AUDIO = b'\x00\x00'
+    HEADER_STATUS = b'\x40\x00'
+
     def __init__(self, latency_msec, time_machine, sample_queue, compress=False):
         self.sample_queue = sample_queue
         self.time_machine = time_machine
         self.latency_msec = latency_msec
         self.compress = compress
 
-    def create_socket(self, channels, ttl, multicast_loop):
+    def create_socket(self, channels, ttl, multicast_loop, broadcast):
         "Create a UDP multicast socket"
         import socket
         import struct
@@ -144,9 +150,13 @@ class Packetizer:
         self.sock.setsockopt(socket.IPPROTO_IP,
                              socket.IP_MULTICAST_TTL,
                              ttl)
+
         if multicast_loop is True:
             self.sock.setsockopt(socket.IPPROTO_IP,
                                  socket.IP_MULTICAST_LOOP, 1)
+
+        if broadcast is True:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         self.destinations = [
             (address, port)
@@ -168,10 +178,21 @@ class Packetizer:
         chunk_size -= chunk_size % sample_size
         return chunk_size
 
+    def _create_status_packet(self, chunk_no):
+        "Format status packet"
+        flags = Packetizer.HEADER_STATUS
+        now = datetime.utcnow().timestamp()
+        dgram = flags + struct.pack('dI', now, chunk_no)
+        return dgram
+
     @asyncio.coroutine
     def packetize(self):
+        "Read pre-chunked samples from queue and send them over UDP"
         start = time()
-        pkts = 0
+        # Numer of sent packets
+        stat_pkts = 0
+        # Chunk number as seen by receivers
+        chunk_no = 0
         bytes_sent = 0
         bytes_raw = 0
         cancelled_compressions = 0
@@ -190,24 +211,29 @@ class Packetizer:
                 chunk_compressed = zlib.compress(chunk, self.compress)
                 if len(chunk_compressed) < chunk_len:
                     # Go with compressed
-                    dgram = b'\x80\x00' + mark + chunk_compressed
+                    dgram = Packetizer.HEADER_COMPRESSED_AUDIO + mark + chunk_compressed
                 else:
                     # Cancel - compressed might not fit to packet
-                    dgram = b'\x00\x00' + mark + chunk
+                    dgram = Packetizer.HEADER_RAW_AUDIO + mark + chunk
                     cancelled_compressions += 1
             else:
                 dgram = b'\x00\x00' + mark + chunk
 
             dgram_len = len(dgram)
+            chunk_no += 1
+            recent += 1
             for destination in self.destinations:
                 self.sock.sendto(dgram, destination)
                 bytes_sent += dgram_len
                 recent_bytes += dgram_len
                 bytes_raw += chunk_len + 4
+                stat_pkts += 1
 
-                pkts += 1
-
-            recent += 1
+            # Send small status datagram every 620 chunks - ~ 5 seconds
+            if chunk_no % 200 == 0:
+                dgram = self._create_status_packet(chunk_no)
+                for destination in self.destinations:
+                    self.sock.sendto(dgram, destination)
 
             if recent >= 100:
                 # Main status line
@@ -218,7 +244,7 @@ class Packetizer:
                      "kB/s: avg=%.3f cur=%.3f")
                 s = s % (
                     len(self.destinations),
-                    pkts,
+                    stat_pkts,
                     bytes_sent / 1024, took_total,
                     bytes_sent / took_total / 1024,
                     recent_bytes / took_recent / 1024,
@@ -258,6 +284,9 @@ class Receiver(asyncio.DatagramProtocol):
 
         self.chunk_available = asyncio.Event()
 
+        self.stat_network_latency = 0
+        self.stat_network_drops = 0
+
         super().__init__()
 
     def connection_made(self, transport):
@@ -270,6 +299,10 @@ class Receiver(asyncio.DatagramProtocol):
 
         multicast = True
         octets = group.split('.')
+
+        # Received audio chunk counter
+        self.chunk_no = 0
+        self.last_sender_chunk_no = None
 
         if len(octets) != 4:
             multicast = False
@@ -297,14 +330,43 @@ class Receiver(asyncio.DatagramProtocol):
         header = data[:2]
         mark = data[2:4]
         chunk = data[4:]
-        if header == b'\x80\x00':
+        if header == Packetizer.HEADER_COMPRESSED_AUDIO:
             chunk = zlib.decompress(chunk)
-        elif header == b'\x00\x00':
+        elif header == Packetizer.HEADER_RAW_AUDIO:
             pass
+        elif header == Packetizer.HEADER_STATUS:
+            # Status header!
+            now = datetime.utcnow().timestamp()
+            sender_timestamp, sender_chunk_no = struct.unpack('dI', data[2:2+8+8])
+
+            # If this is first status packet OR the sender seems to be restarted
+            if self.last_sender_chunk_no is None or sender_chunk_no < 1500:
+                self.last_sender_chunk_no = sender_chunk_no
+                self.chunk_no = 0
+                dropped = 0
+            else:
+                chunks_sent = sender_chunk_no - self.last_sender_chunk_no
+                self.last_sender_chunk_no = sender_chunk_no
+                dropped = chunks_sent - self.chunk_no
+                self.chunk_no = 0
+
+            self.stat_network_latency = (now - sender_timestamp)
+            self.stat_network_drops += dropped
+            if dropped < 0:
+                print("WARNING: You are receiving multiple streams! That can't work")
+
+            #s = "TX-RX STATE: network latency: %.3f ms; network drops: %d"
+            #s = s % (, dropped)
+            #print(s)
+            return
         else:
             print("Invalid header!")
+            return
         mark = self.time_machine.to_absolute_timestamp(mark)
         item = (mark, chunk)
+
+        # Count received audio-chunks
+        self.chunk_no += 1
 
         self.chunk_list.append(item)
         self.chunk_available.set()
@@ -400,13 +462,19 @@ class Receiver(asyncio.DatagramProtocol):
 
             # Main status line
             if cnt % 50 == 0:
-                s = "STATE: queue=%-3d sched_latency=%5.2fms avg_delay=%6.2fms drops=%d" % (
+                s = ("STATUS: queue=%-3d latency[ms]: sched=%-4.1f net=%-5.1f "
+                     "avg_delay=%-4.2f drops: time=%d net=%d")
+                s = s % (
                     len(self.chunk_list),
                     1000.0 * sched_latency,
+                    1000.0 * self.stat_network_latency,
                     1000.0 * total_delay/cnt,
-                    drops
+                    drops,
+                    self.stat_network_drops
                 )
                 print(s)
+                if self.stat_network_latency > 5:
+                    print("WARNING: Your network latency seems HUGE. Are the clocks synchronized?")
 
 
 def _parse_arguments():
@@ -414,6 +482,7 @@ def _parse_arguments():
     import argparse
 
     version = ".".join(str(p) for p in VERSION)
+
     dst="WaveSync %s - multi-room sound synchronization system"
     dst = dst % version
     p = argparse.ArgumentParser(description=dst)
@@ -441,7 +510,7 @@ def _parse_arguments():
                      help="assumed system latency in miliseconds")
 
     snd.add_argument("--mtu",
-             	     metavar="MTU",
+                     metavar="MTU",
                      action="store",
                      type=int,
                      default=1500,
@@ -471,6 +540,10 @@ def _parse_arguments():
                      action="store_false",
                      default=True,
                      help="Do not loop multicast packets back to the sender")
+
+    snd.add_argument("--broadcast",
+                     action="store_true",
+                     help="Use transmission to broadcast target")
 
     rcv.add_argument("--tolerance",
                      dest='tolerance_msec',
@@ -543,7 +616,8 @@ def start_tx(args, loop, time_machine):
 
     packetizer.create_socket(args.ip_list,
                              args.ttl,
-                             args.multicast_loop)
+                             args.multicast_loop,
+                             args.broadcast)
 
     # Sound sample reader
     data_size = packetizer.get_chunk_size(args.mtu, args.sample_size)
