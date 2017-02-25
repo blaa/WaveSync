@@ -25,7 +25,7 @@ from functools import partial
 
 from collections import deque
 
-VERSION=(0, 2, 0)
+VERSION=(0, 3, 0)
 
 class TimeMachine:
     """
@@ -160,8 +160,6 @@ class SampleReader(asyncio.Protocol):
         return self.sample_queue.get()
 
 
-
-
 class Packetizer:
     """Read chunks from queue, add timestamp marks and send over multicast."""
 
@@ -267,8 +265,10 @@ class Packetizer:
                         print("Trying MTU detection. New payload size is %d" % new_size)
                         break
 
-            # Send small status datagram every 620 chunks - ~ 5 seconds
-            if chunk_no % 200 == 0:
+            # Send small status datagram every 124 chunks - ~ 1 second
+            # It's used to determine if some frames were lost on the network
+            # and therefore if output buffer resync is required.
+            if chunk_no % 124 == 0:
                 dgram = self._create_status_packet(chunk_no)
                 for destination in self.destinations:
                     self.sock.sendto(dgram, destination)
@@ -305,6 +305,10 @@ class Receiver(asyncio.DatagramProtocol):
     - decode headers
     - store in chunk list.
     """
+
+    CMD_AUDIO = 1
+    CMD_DROPS = 2
+
     def __init__(self, time_machine, channel):
         # Store config
         self.channel = channel
@@ -359,38 +363,59 @@ class Receiver(asyncio.DatagramProtocol):
         mreq = struct.pack('4sL', group, socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
+    def _handle_status(self, data):
+        now = datetime.utcnow().timestamp()
+        sender_timestamp, sender_chunk_no = struct.unpack('dI', data[2:2+8+8])
+
+        # Handle timestamp
+        self.stat_network_latency = (now - sender_timestamp)
+
+        # Handle dropped packets
+
+        # If this is first status packet
+        # or low sender_chunk_no indicates that sender was restarted
+        if self.last_sender_chunk_no is None or sender_chunk_no < 1500:
+            self.last_sender_chunk_no = sender_chunk_no
+            self.chunk_no = 0
+            dropped = 0
+            return
+
+        # How many chunks were transmitted since previous status packet?
+        chunks_sent = sender_chunk_no - self.last_sender_chunk_no
+        dropped = chunks_sent - self.chunk_no
+
+        self.last_sender_chunk_no = sender_chunk_no
+        self.chunk_no = 0
+
+        self.stat_network_drops += dropped
+        if dropped < 0:
+            print("WARNING: More pkts received than sent! You are receiving multiple streams.")
+
+        #s = "TX-RX STATE: network latency: %.3f ms; network drops: %d"
+        #s = s % (, dropped)
+        #print(s)
+        if dropped > 0:
+            self.chunk_list.append((self.CMD_DROPS, dropped))
+            self.chunk_available.set()
+
+
     def datagram_received(self, data, addr):
+        "Handle incoming datagram - audio chunk, or status packet"
+
         header = data[:2]
         mark = data[2:4]
         chunk = data[4:]
-        if header == Packetizer.HEADER_COMPRESSED_AUDIO:
-            chunk = zlib.decompress(chunk)
-        elif header == Packetizer.HEADER_RAW_AUDIO:
+        if header == Packetizer.HEADER_RAW_AUDIO:
             pass
+        elif header == Packetizer.HEADER_COMPRESSED_AUDIO:
+            try:
+                chunk = zlib.decompress(chunk)
+            except zlib.error:
+                print("WARNING: Invalid compressed data - dropping")
+                return
         elif header == Packetizer.HEADER_STATUS:
             # Status header!
-            now = datetime.utcnow().timestamp()
-            sender_timestamp, sender_chunk_no = struct.unpack('dI', data[2:2+8+8])
-
-            # If this is first status packet OR the sender seems to be restarted
-            if self.last_sender_chunk_no is None or sender_chunk_no < 1500:
-                self.last_sender_chunk_no = sender_chunk_no
-                self.chunk_no = 0
-                dropped = 0
-            else:
-                chunks_sent = sender_chunk_no - self.last_sender_chunk_no
-                self.last_sender_chunk_no = sender_chunk_no
-                dropped = chunks_sent - self.chunk_no
-                self.chunk_no = 0
-
-            self.stat_network_latency = (now - sender_timestamp)
-            self.stat_network_drops += dropped
-            if dropped < 0:
-                print("WARNING: You are receiving multiple streams! That can't work")
-
-            #s = "TX-RX STATE: network latency: %.3f ms; network drops: %d"
-            #s = s % (, dropped)
-            #print(s)
+            self._handle_status(data)
             return
         else:
             print("Invalid header!")
@@ -401,7 +426,7 @@ class Receiver(asyncio.DatagramProtocol):
         # Count received audio-chunks
         self.chunk_no += 1
 
-        self.chunk_list.append(item)
+        self.chunk_list.append((self.CMD_AUDIO, item))
         self.chunk_available.set()
 
     def error_received(self, exc):
@@ -412,28 +437,35 @@ class Receiver(asyncio.DatagramProtocol):
         loop = asyncio.get_event_loop()
         loop.stop()
 
+
 class Player:
     "Play received audio and keep sync"
 
     def __init__(self, receiver, output_socket,
                  tolerance, sink_latency):
 
+        # Our data source
         self.receiver = receiver
 
+        # Path to the output 
+        self.output_socket = output_socket
+
+        # Configuration
         self.tolerance = tolerance
         self.sink_latency = sink_latency
 
-        self.output_socket = output_socket
+        # Required for silence insertion
+        self.last_chunk_size = 0
 
+        # Stats
         self.stat_drops = 0
         self.stat_total_delay = 0
 
         # Generate silence frames (zeroed) of appropriate sizes for chunks
         self.silence_cache = {}
 
-    def get_silent_chunk(self, base_chunk):
+    def get_silent_chunk(self, size):
         "Generate and cache silent chunks"
-        size = len(base_chunk)
 
         silent_chunk = self.silence_cache.get(size, None)
 
@@ -455,7 +487,6 @@ class Player:
             else:
                 break
 
-
     @asyncio.coroutine
     def pump_audio(self):
         "Reads asynchronously chunks from the list and feeds into Unix socket"
@@ -475,9 +506,17 @@ class Player:
                 yield from self.receiver.chunk_available.wait()
                 continue
 
-            item = self.receiver.chunk_list.popleft()
-            mark, chunk = item
+            cmd, item = self.receiver.chunk_list.popleft()
 
+            if cmd == self.receiver.CMD_DROPS:
+                silent_chunk = self.get_silent_chunk(self.last_chunk_size)
+                for i in range(item):
+                    pulse_writer.write(silent_chunk)
+                continue
+
+            # CMD_AUDIO
+
+            mark, chunk = item
             desired_time = mark - self.sink_latency
 
             # 0) We got the next chunk to be played
@@ -488,10 +527,7 @@ class Player:
             self.stat_total_delay += delay
 
             # 1) We are falling behind and need to drop something to get back
-            # on track. Our output has some buffer too and dropping just few
-            # frames might not fix the sync. We need to flush the buffers of
-            # the output by waiting longer. At least `tolerance` time,
-            # but maybe tolerance + sink_latency.
+            # on track. 
             if delay < -self.tolerance:
                 s = "Falling behind - resync: delay=%.3fms <= %.3fms"
                 s = s % (delay*1000, -self.tolerance*1000)
@@ -535,6 +571,7 @@ class Player:
             # Let's hear the music.
             # NOTE: Detect pulseaudio failure and stop.
             pulse_writer.write(chunk)
+            self.last_chunk_size = len(chunk)
             if cnt % 5 == 0:
                 start = time()
                 yield from pulse_writer.drain()

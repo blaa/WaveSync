@@ -9,6 +9,7 @@ Random project Notes
 ** TODO Implement packet reordering upon arrival
 ** TODO Add check for chunk table overflow to fix memleak if pulseaudio hangs
    Happens on native rpi audio card
+** TODO Initial output buffer pre-fill to even-out latency
 
 * Current timemark format
 ** Create timemark:
