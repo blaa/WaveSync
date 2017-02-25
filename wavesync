@@ -67,11 +67,31 @@ class SampleReader(asyncio.Protocol):
     # Number of empty chunks before silence is detected.
     SILENCE_TRESHOLD = 30
 
-    def __init__(self, sample_queue, chunk_size):
+    HEADER_SIZE = 4
+
+    def __init__(self):
         super().__init__()
-        self.chunk_size = chunk_size
-        self.sample_queue = sample_queue
+        self.sample_queue = asyncio.Queue()
+
         self.silence_detect = 0
+
+    def set_chunk_size(self, payload_size, sample_size):
+        "Calculate optimal chunk size"
+        # 1420 is max payload for UDP over 1500 MTU ethernet
+        # 80 - max IP header (60) + UDP header.
+        # 4 - our header / timestamp
+        # NOTE: 60 bytes is pessimistically large IP header. Could be as
+        #       small as 20 bytes.
+
+        # Remove our header from the max payload size
+        self.chunk_size = payload_size - self.HEADER_SIZE
+
+        # To fit always the same amount of both channels (to not swap them in case
+        # of a packet drop) ensure the amount of space is divisible by sample_size
+        self.chunk_size -= self.chunk_size % sample_size
+
+        # Required for MTU detection
+        self.sample_size = sample_size
 
     def connection_made(self, transport):
         "Initialize stream buffer"
@@ -114,7 +134,6 @@ class SampleReader(asyncio.Protocol):
 
             self.sample_queue.put_nowait(chunk)
 
-
         # Warning - might happen on slow UDP output sink
         if self.sample_queue.qsize() > 30:
             s = "WARNING: Samples in queue: %d - slow UDP transmission!"
@@ -126,6 +145,22 @@ class SampleReader(asyncio.Protocol):
         loop = asyncio.get_event_loop()
         loop.close()
 
+    def decrement_chunk_size(self):
+        "Decrement chunk size and flush chunks currently in queue"
+        self.chunk_size -= 1
+        self.chunk_size -= self.chunk_size % self.sample_size
+        while True:
+            try:
+                self.sample_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        return self.chunk_size + self.HEADER_SIZE
+
+    def get_next_chunk(self):
+        return self.sample_queue.get()
+
+
+
 
 class Packetizer:
     """Read chunks from queue, add timestamp marks and send over multicast."""
@@ -134,8 +169,8 @@ class Packetizer:
     HEADER_RAW_AUDIO = b'\x00\x00'
     HEADER_STATUS = b'\x40\x00'
 
-    def __init__(self, latency_msec, time_machine, sample_queue, compress=False):
-        self.sample_queue = sample_queue
+    def __init__(self, reader, time_machine, latency_msec, compress=False):
+        self.reader = reader
         self.time_machine = time_machine
         self.latency_msec = latency_msec
         self.compress = compress
@@ -163,20 +198,12 @@ class Packetizer:
             for address, port in channels
         ]
 
-    def get_chunk_size(self, mtu, sample_size):
-        "Calculate optimal chunk size"
-        # 1420 is max payload for UDP over 1500 MTU ethernet
-        # 80 - IP, UDP headers
-        # 2 - our header / timestamp
-        # NOTE: 60 bytes is pessimistically large IP header. Could be as
-        #       small as 20 bytes.
-
-        chunk_size = mtu - 80 - 4 # IP, UDP headers
-
-        # To fit always the same amount of both channels (to not swap them in case
-        # of a packet drop) ensure the amount of space is divisible by sample_size
-        chunk_size -= chunk_size % sample_size
-        return chunk_size
+        IP_PMTUDISC_DO = 2
+        IP_MTU_DISCOVER = 10
+        IP_MTU = 14
+        # Set DF flag on IP packet (Don't Fragment) - fragmenting would be bad idea
+        # it's way better to chunk the packets right.
+        self.sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
 
     def _create_status_packet(self, chunk_no):
         "Format status packet"
@@ -203,7 +230,8 @@ class Packetizer:
         recent_start = time()
 
         while True:
-            chunk = yield from self.sample_queue.get()
+            # Block until samples are read by the reader.
+            chunk = yield from self.reader.get_next_chunk()
             mark = self.time_machine.get_timemark(self.latency_msec)
 
             chunk_len = len(chunk)
@@ -223,11 +251,21 @@ class Packetizer:
             chunk_no += 1
             recent += 1
             for destination in self.destinations:
-                self.sock.sendto(dgram, destination)
-                bytes_sent += dgram_len
-                recent_bytes += dgram_len
-                bytes_raw += chunk_len + 4
-                stat_pkts += 1
+                try:
+                    self.sock.sendto(dgram, destination)
+                    bytes_sent += dgram_len
+                    recent_bytes += dgram_len
+                    bytes_raw += chunk_len + 4
+                    stat_pkts += 1
+                except OSError as e:
+                    import errno
+                    if e.errno == errno.EMSGSIZE:
+                        s = "WARNING: UDP datagram size (%d) is too big for your network MTU"
+                        s = s % len(dgram)
+                        print(s)
+                        new_size = self.reader.decrement_chunk_size()
+                        print("Trying MTU detection. New payload size is %d" % new_size)
+                        break
 
             # Send small status datagram every 620 chunks - ~ 5 seconds
             if chunk_no % 200 == 0:
@@ -553,12 +591,12 @@ def _parse_arguments():
                      type=int,
                      help="assumed system latency in miliseconds")
 
-    snd.add_argument("--mtu",
-                     metavar="MTU",
+    snd.add_argument("--payload-size",
+                     metavar="BYTES",
                      action="store",
                      type=int,
-                     default=1500,
-                     help="network MTU")
+                     default=1500 - 80,
+                     help="UDP payload size, 1420 is the safe default")
 
     snd.add_argument("--ttl",
                      metavar="TTL",
@@ -652,20 +690,20 @@ def _parse_arguments():
 
 def start_tx(args, loop, time_machine):
     "Initialize sender"
-    sample_queue = asyncio.Queue()
+
+    # Sound sample reader
+    sample_reader = SampleReader()
+    sample_reader.set_chunk_size(args.payload_size, args.sample_size)
 
     # Packet splitter / sender
-    packetizer = Packetizer(args.latency_msec, time_machine,
-                            sample_queue, compress=args.compress)
+    packetizer = Packetizer(sample_reader, time_machine,
+                            args.latency_msec,
+                            compress=args.compress)
 
     packetizer.create_socket(args.ip_list,
                              args.ttl,
                              args.multicast_loop,
                              args.broadcast)
-
-    # Sound sample reader
-    data_size = packetizer.get_chunk_size(args.mtu, args.sample_size)
-    sample_reader = SampleReader(sample_queue, data_size)
 
     connection = loop.create_unix_connection(lambda: sample_reader, args.tx)
 
