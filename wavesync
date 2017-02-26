@@ -25,7 +25,7 @@ from functools import partial
 
 from collections import deque
 
-VERSION=(0, 3, 0)
+VERSION=(0, 3, 1)
 
 class TimeMachine:
     """
@@ -143,7 +143,7 @@ class SampleReader(asyncio.Protocol):
     def connection_lost(self, exc):
         print("The pulse was lost. I should go.")
         loop = asyncio.get_event_loop()
-        loop.close()
+        loop.call_soon_threadsafe(loop.stop)
 
     def decrement_chunk_size(self):
         "Decrement chunk size and flush chunks currently in queue"
@@ -442,17 +442,18 @@ class Player:
     "Play received audio and keep sync"
 
     def __init__(self, receiver, output_socket,
-                 tolerance, sink_latency):
+                 sample_size, tolerance, sink_latency):
 
         # Our data source
         self.receiver = receiver
 
-        # Path to the output 
+        # Path to the output
         self.output_socket = output_socket
 
         # Configuration
         self.tolerance = tolerance
         self.sink_latency = sink_latency
+        self.sample_size = sample_size
 
         # Required for silence insertion
         self.last_chunk_size = 0
@@ -466,6 +467,11 @@ class Player:
 
     def get_silent_chunk(self, size):
         "Generate and cache silent chunks"
+
+        if size == -1:
+            # Get a synthetic, yet correct, silence chunk
+            size = 1500 - 80 - 4
+            size -= size % self.sample_size
 
         silent_chunk = self.silence_cache.get(size, None)
 
@@ -495,6 +501,10 @@ class Player:
         sched_latency = 0.001
         cnt = 0
 
+        # Chunk/s stat
+        recent_start = time()
+        recent = 0
+
         # Connect to unix socket
         conn = yield from asyncio.open_unix_connection(self.output_socket)
         pulse_reader, pulse_writer = conn
@@ -504,6 +514,8 @@ class Player:
                 self.receiver.chunk_available.clear()
                 print("Queue empty, waiting for initial data...")
                 yield from self.receiver.chunk_available.wait()
+                recent_start = time()
+                recent = 0
                 continue
 
             cmd, item = self.receiver.chunk_list.popleft()
@@ -520,14 +532,13 @@ class Player:
             desired_time = mark - self.sink_latency
 
             # 0) We got the next chunk to be played
-            cnt += 1
             now = datetime.utcnow().timestamp()
             delay = desired_time - now
 
             self.stat_total_delay += delay
 
             # 1) We are falling behind and need to drop something to get back
-            # on track. 
+            # on track.
             if delay < -self.tolerance:
                 s = "Falling behind - resync: delay=%.3fms <= %.3fms"
                 s = s % (delay*1000, -self.tolerance*1000)
@@ -570,21 +581,27 @@ class Player:
 
             # Let's hear the music.
             # NOTE: Detect pulseaudio failure and stop.
+            recent += 1
+            cnt += 1
             pulse_writer.write(chunk)
             self.last_chunk_size = len(chunk)
             if cnt % 5 == 0:
                 start = time()
                 yield from pulse_writer.drain()
                 took = time() - start
+                #print("DRAIN TOOK %.3fms" % (took * 1000))
                 if took > self.tolerance:
                     print("WARNING: Output pipe seems slow! Drain took %.3fms" % (took * 1000))
 
             # Main status line
-            if cnt % 50 == 0:
-                s = ("STATUS: queue=%-3d latency[ms]: sched=%-4.1f net=%-5.1f "
+            if recent > 200:
+                chunks_per_s = recent / (time() - recent_start)
+
+                s = ("STATUS: chunks: queue=%-3d play/s=%-5.1f latency[ms]: sched=%-4.1f net=%-5.1f "
                      "avg_delay=%-5.2f drops: time=%d net=%d")
                 s = s % (
                     len(self.receiver.chunk_list),
+                    chunks_per_s,
                     1000.0 * sched_latency,
                     1000.0 * self.receiver.stat_network_latency,
                     1000.0 * self.stat_total_delay/cnt,
@@ -592,6 +609,11 @@ class Player:
                     self.receiver.stat_network_drops
                 )
                 print(s)
+
+                recent_start = time()
+                recent = 0
+
+                # Warnings
                 if self.receiver.stat_network_latency > 4:
                     print("WARNING: Your network latency seems HUGE. Are the clocks synchronized?")
                 elif self.receiver.stat_network_latency < 0:
@@ -644,13 +666,6 @@ def _parse_arguments():
                      default=2,
                      help="multicast TTL")
 
-    snd.add_argument("--sample-size",
-                     metavar="BYTES",
-                     action="store",
-                     type=int,
-                     default=4,
-                     help="sample size in bytes (16-bit 2-channel = 4 bytes)")
-
     snd.add_argument("--compress",
                      action="store",
                      default=False,
@@ -690,6 +705,13 @@ def _parse_arguments():
                      default=[],
                      help="multicast group or a unicast address, "
                           "may be given multiple times with --tx")
+
+    opt.add_argument("--sample-size",
+                     metavar="BYTES",
+                     action="store",
+                     type=int,
+                     default=4,
+                     help="sample size in bytes (16-bit 2-channel = 4 bytes)")
 
     opt.add_argument("--debug",
                      action="store_true",
@@ -750,6 +772,8 @@ def start_tx(args, loop, time_machine):
     # Start loop
     asyncio.async(packetizer.packetize())
     asyncio.async(connection)
+    loop.run_forever()
+
 
 
 def start_rx(args, loop, time_machine):
@@ -767,14 +791,14 @@ def start_rx(args, loop, time_machine):
     # Corouting pumping audio into PA
     player = Player(receiver,
                     output_socket=args.rx,
+                    sample_size=args.sample_size,
                     tolerance=args.tolerance_msec / 1000.0,
                     sink_latency=args.sink_latency_msec / 1000.0)
 
     pump = player.pump_audio()
 
     asyncio.async(connection)
-    asyncio.async(pump)
-
+    loop.run_until_complete(pump)
 
 def main():
     "Parse arguments and start the event loop"
@@ -787,17 +811,13 @@ def main():
 
     time_machine = TimeMachine()
 
-    if args.tx is not None:
-        start_tx(args, loop, time_machine)
-    elif args.rx is not None:
-        start_rx(args, loop, time_machine)
-
     try:
-        loop.run_forever()
+        if args.tx is not None:
+            start_tx(args, loop, time_machine)
+        elif args.rx is not None:
+            start_rx(args, loop, time_machine)
     finally:
-        print('closing event loop')
         loop.close()
-
 
 if __name__ == "__main__":
     main()
