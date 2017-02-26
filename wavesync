@@ -520,7 +520,7 @@ class Player:
 
         # Pre-fill with silence
         chunk = self.get_silent_chunk(-1)
-        for i in range(300):
+        for i in range(125 * 8):
             pulse_writer.write(chunk)
         yield from pulse_writer.drain()
 
@@ -529,6 +529,11 @@ class Player:
         total = 0
         stat_silence = 0
         stat_audio = 0
+
+        # Ensure queue didn't grow too big while we were filling buffers
+        while len(self.player_queue) > 0.25 * self.PLAYER_QUEUE_TARGET:
+            self.player_queue.popleft()
+
         while True:
 
             if self.silence_to_insert > 0:
@@ -582,8 +587,6 @@ class Player:
     def pump_audio(self):
         "Reads asynchronously chunks from the list and feeds into Unix socket"
 
-        # Self-tuning scheduling latency
-        sched_latency = 0.001
         cnt = 0
 
         # Chunk/s stat
@@ -595,7 +598,7 @@ class Player:
             print("Waiting for initial data...")
             yield from self.receiver.chunk_available.wait()
 
-        yield from asyncio.sleep(1.0)
+        yield from asyncio.sleep(0.2)
         print("Got initial data, entering loop")
 
         while True:
@@ -631,12 +634,17 @@ class Player:
 
             self.stat_total_delay += delay
 
+            # Let's hear the music.
+            # NOTE: Detect pulseaudio failure and stop.
+            recent += 1
+            cnt += 1
+
             # Probabilistic drop of lagging chunks to get back on track.
             # delay = - 2 * tolerance -> drop probability = 1
             # delay = -tolerance -> drop probability = 0
             # Similar to a RED algorithm for TCP congestion.
-            if delay < -self.tolerance:
-                over = delay + self.tolerance
+            if delay < - 0.5 * self.tolerance:
+                over = delay + 0.5 * self.tolerance
                 prob = over / self.tolerance
                 if random.random() < prob:
                     s = "Lag delay=%.3fms <= tolerance=%.3fms: probabilistic drop (P=%.2f)"
@@ -669,66 +677,14 @@ class Player:
                 print("PROB:", prob)
                 if random.random() < prob:
                     print("Player queue at %.2f fill: random drop (P=%.3f) + wait" % (prob, queue_fill))
-                    # Give it some time
-                    yield from asyncio.sleep(self.tolerance / 2)
-                    continue
+                    # Drop 2 from beginning and give it some time
+                    self.player_queue.popleft()
+                    self.player_queue.popleft()
+                    yield from asyncio.sleep(3/1000)
                 else:
                     print("Player queue at %.2f fill: wait" % queue_fill)
-                    yield from asyncio.sleep(self.tolerance / 2)
+                    yield from asyncio.sleep(3/1000)
 
-
-
-
-
-            """
-            if player_queue_len > 1.5 * self.PLAYER_QUEUE_TARGET:
-                too_much = player_queue_len - self.PLAYER_QUEUE_TARGET
-                # Wait until there's a chance to play
-                to_wait = max(0.001, too_much * (1 / self.chunks_per_s))
-                print("Player queue full, waiting for %d chunks %.3f ms" % (too_much, to_wait*1000))
-                yield from asyncio.sleep(to_wait)
-            """
-
-
-            """
-            # 2) Is it too much in the future? Wait for it!
-            if delay > 3 * sched_latency:
-                #print("Waiting for it, delay=%.3f sched_latency=%.6f" % (
-                #    delay, sched_latency)
-                #)
-                # Wait until we reach tolerated range
-                yield from asyncio.sleep(delay - sched_latency)
-                # Update scheduling latency every X times
-
-                if cnt % 15 == 0:
-                    # Calculate the "overshoot"
-                    new_now = datetime.utcnow().timestamp()
-                    jump_error = new_now - desired_time
-
-                    # jump_error > 0 - we overshoot
-                    # jump_error < 0 - we are early
-                    orig = sched_latency
-
-                    # Correct overshoot more eagerly than being early
-                    if jump_error > 0:
-                        sched_latency += jump_error
-                    else:
-                        sched_latency += jump_error / 4
-
-                    #print("sl=%.6f - je=%.6f - sl_now=%.6f" % (orig, jump_error, sched_latency))
-
-                    if sched_latency > self.tolerance:
-                        print("sched_latency too high")
-                        sched_latency = self.tolerance
-                    #print("new_delay=%.4f updated sched_latency=%.6f " % (
-                    #    new_delay, sched_latency)
-                    #)
-            """
-
-            # Let's hear the music.
-            # NOTE: Detect pulseaudio failure and stop.
-            recent += 1
-            cnt += 1
 
             self.player_queue.append(chunk)
 
@@ -750,13 +706,12 @@ class Player:
             # Main status line
             if recent > 200:
                 s = ("STATUS: chunks: q=%-3d play/s=%-5.1f play_q: %d "
-                     "latency[ms]: sched=%-4.1f net=%-5.1f "
+                     "net latency: %-5.1fms "
                      "avg_delay=%-5.2f drops: time=%d net=%d")
                 s = s % (
                     len(self.receiver.chunk_list),
                     self.chunks_per_s,
                     len(self.player_queue),
-                    1000.0 * sched_latency,
                     1000.0 * self.receiver.stat_network_latency,
                     1000.0 * self.stat_total_delay/cnt,
                     self.stat_drops,
