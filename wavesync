@@ -26,7 +26,7 @@ from functools import partial
 
 from collections import deque
 
-VERSION=(0, 3, 1)
+VERSION=(0, 4, 0)
 
 class TimeMachine:
     """
@@ -393,11 +393,9 @@ class Receiver(asyncio.DatagramProtocol):
 
         self.stat_network_drops += dropped
         if dropped < 0:
-            print("WARNING: More pkts received than sent! You are receiving multiple streams.")
+            print("WARNING: More pkts received than sent! "
+                  "You are receiving multiple streams or duplicates.")
 
-        #s = "TX-RX STATE: network latency: %.3f ms; network drops: %d"
-        #s = s % (, dropped)
-        #print(s)
         if dropped > 0:
             self.chunk_list.append((self.CMD_DROPS, dropped))
             self.chunk_available.set()

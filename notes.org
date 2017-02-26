@@ -1,18 +1,36 @@
 Random project Notes
 
 * TODOs
-** TODO Handle errors which should cause event loop to stop.
-** TODO Idea: Initial output buffer pre-fill to even-out latency
 ** TODO Implement packet reordering upon arrival
-   Still doesn't seem needed over my crazy LAN. Will wait for requests.
-** TODO Add check for chunk table overflow to fix memleak if pulseaudio hangs
-   Happens on a native rpi audio card.
-** TODO Idea: Insert silence every n-th chunk to make it less noticable
-   Or duplicate original chunks with certain properties
-** TODO Queue getting empty case seems to need a closer look 
+   Still doesn't seem needed over my crazy LAN. Will wait for requests. I've
+   noticed problem with duplicated packets. Not very problematic but numbering
+   the packets in header would fix it and handle drops immediately.
+
+** DONE Idea: Insert silence every n-th chunk to make it less noticable
+   CLOSED: [2017-02-26 Sun 18:55]
+   Still Idea: Or duplicate original chunks with certain properties
+   but it sounds bad. Silence is inserted currently.
+** DONE Queue getting empty case seems to need a closer look
+   CLOSED: [2017-02-26 Sun 18:54]
+   It caused desync due to output buffers having varying levels of fill. With
+   pressurised player the output buffers are flooded with silence in case of
+   empty queue so that latency is constant.
+** DONE Idea: Initial output buffer pre-fill to even-out latency
+   CLOSED: [2017-02-26 Sun 18:54]
+   Did it in pressurised player during initialization.
+** DONE Handle errors which should cause event loop to stop.
+   CLOSED: [2017-02-26 Sun 18:54]
+
+   Should work although raises ugly exceptions.
 ** DONE Add additional frame type with a sender absolute time to do a time sanity check
    CLOSED: [2017-02-25 Sat 23:09]
    Sanity check added and also fixed sync problem on packet loss
+** CANCELLED Add check for chunk table overflow to fix memleak if pulseaudio hangs
+   CLOSED: [2017-02-26 Sun 18:59]
+   Happens on a native rpi audio card.
+
+   This shouldn't happen now with pressurised player. IO is moved further from
+   this queue and player queue length is controlled.
 
 ** CANCELLED Expand timemark from 2-byte to 3-bytes to cover whole hour
    CLOSED: [2017-02-25 Sat 23:08]
@@ -49,5 +67,5 @@ Random project Notes
 
   --|m start|----|now|----|m end,m+1 start|----|m+1 ends|
                                              ^ - ABSOLUTE HERE
-                                             
-  This two cases allow to reassemble the absolute time.                                             
+
+  This two cases allow to reassemble the absolute time.

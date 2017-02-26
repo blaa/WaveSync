@@ -11,6 +11,9 @@ area networks (Ethernet or Wi-Fi) using cheap components and no additional cable
 - works with Debian Stable/Raspbian Python with no external dependencies,
 - works with multicast, unicast or broadcast transmission,
 - detects silence and stops flooding the network,
+- generates stable "pressure" on output buffers to get rid of sink latency variation,
+- uses graceful probabilistic packet drop to sync when lagging behind,
+- inserts intermittent silence chunks on packet drops to gracefully sync playback,
 - requires NTP time synchronization,
 - increases audio latency, not suitable for gaming and requires A-V correction
   for movie playback.
@@ -76,7 +79,7 @@ Configuration
 
   ```
   rpi-rx1 $ wavesync --rx /tmp/music.sink --sink-latency 80
-  rpi-rx2 $ wavesync --rx /tmp/music.sink --sink-latency 60
+  rpi-rx2 $ wavesync --rx /tmp/music.sink --sink-latency 700
   ```
 
 7. Play music, fix your settings, try unicast in case of Wi-Fi, fine-tune
@@ -92,7 +95,7 @@ Configuration
    rx-1 $ wavesync --rx /tmp/music.sink --channel 224.0.0.57:45299
    
    # RPI has a huge sink latency on built-in audio + needs unicast
-   rx-rpiwifi $ wavesync --rx /tmp/music.sink --channel 192.168.1.3:45300 --sink-latency=750
+   rx-rpiwifi $ wavesync --rx /tmp/music.sink --channel 192.168.1.3:45300 --sink-latency=700
    # Laptop over wifi - needs unicast too.
    rx-laptop $ wavesync --rx /tmp/music.sink --channel 192.168.1.2:45299 
    ```
