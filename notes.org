@@ -5,6 +5,7 @@ Random project Notes
    Still doesn't seem needed over my crazy LAN. Will wait for requests. I've
    noticed problem with duplicated packets. Not very problematic but numbering
    the packets in header would fix it and handle drops immediately.
+** TODO Convert receivers to use pyaudio (or sth) to minimize the latency
 
 ** DONE Idea: Insert silence every n-th chunk to make it less noticable
    CLOSED: [2017-02-26 Sun 18:55]

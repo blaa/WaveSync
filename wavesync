@@ -66,7 +66,7 @@ class SampleReader(asyncio.Protocol):
     """Read samples over the network, chunk them and put into a queue"""
 
     # Number of empty chunks before silence is detected.
-    SILENCE_TRESHOLD = 60
+    SILENCE_TRESHOLD = 40
 
     HEADER_SIZE = 4
 
@@ -503,17 +503,6 @@ class Player:
         self.silence_cache[size] = silent_chunk
         return silent_chunk
 
-    def flush_output(self):
-        # Time we will return to playback
-        back_on = now + self.tolerance + self.sink_latency / 2
-        while self.receiver.chunk_list:
-            mark, chunk = self.receiver.chunk_list.popleft()
-            desired_time = mark - self.sink_latency
-            if desired_time < back_on:
-                self.stat_drops += 1
-            else:
-                break
-
     @asyncio.coroutine
     def pressure_player(self):
         """Play chunks and keep a constant pressure on output buffers
@@ -575,7 +564,7 @@ class Player:
 
             yield from pulse_writer.drain()
 
-            if recent > 1000:
+            if recent > 500:
                 recent_took = time() - recent_start
                 chunks_per_s = recent / recent_took
                 self.chunks_per_s *= 3
