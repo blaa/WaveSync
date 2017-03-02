@@ -23,7 +23,8 @@ Configuration
 0. Install at least:
   - python3
   - python3-pip
-  - pulseaudio
+  - pulseaudio (on sender)
+  - portaudio19-dev (on receiver + pip3 install pyaudio or just python-pyaudio if not using pip3)
   - ntp
   - ntpstat
 
