@@ -472,53 +472,50 @@ class Receiver(asyncio.DatagramProtocol):
         loop.stop()
 
 
-class Player:
+class ChunkPlayer:
     "Play received audio and keep sync"
 
-    AUDIO_PLAY, AUDIO_WAIT, AUDIO_RECONFIGURE, AUDIO_QUIT = range(4)
+    def __init__(self, receiver, tolerance,
+                 sink_latency, device_index):
+        # Our data source
+        self.receiver = receiver
 
-    def __init__(self, device_index):
+        # Configuration
+        self.tolerance = tolerance
+        self.sink_latency = sink_latency
 
+        # Audio state
         self.audio_cfg = None
-        self.audio_state = self.AUDIO_WAIT
-        self.player_buffer = b''
-
         self.device_index = device_index
 
+        self.stream = None
+
         # Generate silence frames (zeroed) of appropriate sizes for chunks
-        self.silence_cache = {}
+        self.silence_cache = None
 
         # Number of silent frames that need to be inserted to get in sync
         self.silence_to_insert = 0
 
+        # Stats
+        self.stat_drops = 0
+        self.stat_total_delay = 0
+
     def clear_state(self):
         "Clear player queue"
-        self.player_buffer = b''
         self.silence_to_insert = 0
+        self.receiver.chunk_list.clear()
 
-    def set_config(self, cfg):
-        self.audio_cfg = cfg
-        self.audio_state = self.AUDIO_RECONFIGURE
-
-    def get_silent_chunk(self, size):
+    def get_silent_chunk(self):
         "Generate and cache silent chunks"
+        if self.silence_cache is not None:
+            return self.silence_cache
 
-        if size == -1:
-            # Get a synthetic, yet correct, silence chunk
-            size = 1500 - 80 - 4
-            size -= size % self.sample_size
-
-        silent_chunk = self.silence_cache.get(size, None)
-
-        if silent_chunk is not None:
-            return silent_chunk
-
-        silent_chunk = b'\x00' * size
-        self.silence_cache[size] = silent_chunk
+        silent_chunk = b'\x00' * self.audio_cfg['chunk_size']
+        self.silence_cache = silent_chunk
         return silent_chunk
 
 
-    def play_loop(self, stream, frame_size):
+    def OBSOLETE_play_loop(self, stream, frame_size):
         "Player loop, executed after the device is opened."
         recent = 0
         recent_start = time()
@@ -586,91 +583,49 @@ class Player:
                 recent_start = time()
                 print(s)
 
-
-    @asyncio.coroutine
-    def player(self):
-        """Play chunks and keep a constant pressure on output buffers
-
-        This makes sure the output buffers are close to full
-        """
+    def _open_stream(self):
         import pyaudio
-        pa = pyaudio.PyAudio()
 
-        while True:
-            # Wait for configuration, or reconfiguration
-            while True:
-                if self.audio_state == self.AUDIO_WAIT:
-                    yield from asyncio.sleep(0.5)
-                    print("Waiting for audio start")
-                    continue
-                else:
-                    break
+        assert self.stream is None
+        self.pa = pyaudio.PyAudio()
 
-            if self.audio_state == self.AUDIO_QUIT:
-                break
+        self.clear_state()
 
-            # Entering play loop
-            self.clear_state()
+        # Open stream
+        cfg = self.audio_cfg
+        if cfg['sample'] == 24:
+            frame_size = 3 * cfg['channels']
+            format = pyaudio.paInt24
+        else:
+            frame_size = 2 * cfg['channels']
+            format = pyaudio.paInt16
 
-            # Open stream
-            cfg = self.audio_cfg
-            if cfg['sample'] == 24:
-                frame_size = 3 * cfg['channels']
-                format = pyaudio.paInt24
-            else:
-                frame_size = 2 * cfg['channels']
-                format = pyaudio.paInt16
+        frames_per_buffer = 4096 * 2
 
-            frames_per_buffer = 4096 * 4
+        queue_l = 1/cfg['rate'] * frames_per_buffer
+        print("Output queue length is %.2fms" % (queue_l * 1000))
 
-            queue_l = 1/cfg['rate'] * frames_per_buffer
-            print("Output queue length is %.2fms" % (queue_l * 1000))
+        stream = self.pa.open(output=True,
+                              channels=cfg['channels'],
+                              rate=cfg['rate'],
+                              format=format,
+                              frames_per_buffer=frames_per_buffer,
+                              output_device_index=self.device_index)
 
-            stream = pa.open(output=True,
-                             channels=cfg['channels'],
-                             rate=cfg['rate'],
-                             format=format,
-                             frames_per_buffer=frames_per_buffer,
-                             output_device_index=self.device_index)
-            # TODO: Output_device_index as parameter
-            try:
-                print("Stream configured - entering play loop.")
-                self.audio_state = self.AUDIO_PLAY
-                yield from self.play_loop(stream,
-                                          frame_size)
-            finally:
-                stream.stop_stream()
-                stream.close()
-                yield from asyncio.sleep(1)
-        print("Terminate PA")
-        pa.terminate()
+        self.frame_size = frame_size
+        self.chunk_frames = self.audio_cfg['chunk_size'] / frame_size
+        self.stream = stream
 
-
-class AudioPump:
-
-    def __init__(self, receiver, player,
-                 tolerance, sink_latency):
-
-        # Our data source
-        self.receiver = receiver
-
-        # Our audio output
-        self.player = player
-
-        # Configuration
-        self.tolerance = tolerance
-        self.sink_latency = sink_latency
-
-        self.chunks_per_s = 124
-
-        # Stats
-        self.stat_drops = 0
-        self.stat_total_delay = 0
+    def _close_stream(self):
+        self.stream.stop_stream()
+        self.stream.close()
+        self.pa.terminate()
+        self.stream = None
 
 
     @asyncio.coroutine
-    def pump(self):
-        "Reads asynchronously chunks from the list and feeds into Unix socket"
+    def chunk_player(self):
+        "Reads asynchronously chunks from the list and plays them"
 
         cnt = 0
 
@@ -680,7 +635,8 @@ class AudioPump:
 
         while True:
             if len(self.receiver.chunk_list) == 0:
-                print("Queue empty - waiting")
+                if self.audio_cfg is not None:
+                    print("Queue empty - waiting")
                 self.receiver.chunk_available.clear()
                 yield from self.receiver.chunk_available.wait()
                 recent_start = time()
@@ -690,10 +646,12 @@ class AudioPump:
             cmd, item = self.receiver.chunk_list.popleft()
 
             if cmd == self.receiver.CMD_CFG:
-                print("Set player configuration")
-
-                self.player.clear_state()
-                self.player.set_config(item)
+                print("Got new configuration - opening audio stream")
+                self.clear_state()
+                self.audio_cfg = item
+                if self.stream:
+                    self._close_stream()
+                self._open_stream()
                 continue
 
             if cmd == self.receiver.CMD_DROPS:
@@ -702,10 +660,14 @@ class AudioPump:
                     self.player.clear_state()
                 else:
                     # Just slowly resync
-                    self.player.silence_to_insert += item
+                    self.silence_to_insert += item
                 continue
 
             # CMD_AUDIO
+
+            if self.stream is None:
+                # No output, no playing.
+                continue
 
             mark, chunk = item
             desired_time = mark - self.sink_latency
@@ -726,9 +688,8 @@ class AudioPump:
                 over = -delay
                 prob = over / self.tolerance
                 if random.random() < prob:
-                    s = "chunk_q=%d player_q=%d. Drop chunk: delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
+                    s = "chunk_q=%d. Drop chunk: delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
                     s = s % (len(self.receiver.chunk_list),
-                             len(self.player.player_buffer),
                              delay*1000, -self.tolerance*1000, prob)
                     print(s)
                     self.stat_drops += 1
@@ -737,8 +698,7 @@ class AudioPump:
                 # Probably we hanged for so long time that the time recovering 
                 # mechanism rolled over. Recover
                 print("Huge recovery")
-                self.player.clear_state()
-                self.receiver.chunk_list.clear()
+                self.clear_state()
                 continue
 
             # If chunk is in the future - wait until it's within the tolerance
@@ -748,18 +708,28 @@ class AudioPump:
                 yield from asyncio.sleep(to_wait)
 
 
-            self.player.player_buffer += chunk
-            #self.player_queue.append(chunk)
+            # PLAY HERE.
+
+            # If the write would block - drop the chunk to resync.
+            buffer_space = self.stream.get_write_available()
+            if buffer_space < self.chunk_frames:
+                print("WOULD BLOCK - drop", buffer_space)
+                yield from asyncio.sleep(1/1000)
+            else:
+                self.stream.write(chunk)
+
 
             # Main status line
             if recent > 200:
-                s = ("STATUS: chunks: q=%-3d play/s=%-5.1f play_q: %d "
+                latency = self.stream.get_output_latency()
+                frames_in_chunk = len(chunk) / self.frame_size
+
+                s = ("STATUS: chunks: q=%-3d buf_space_chunks=%3.1f "
                      "net latency: %-5.1fms "
                      "avg_delay=%-5.2f drops: time=%d net=%d")
                 s = s % (
                     len(self.receiver.chunk_list),
-                    self.chunks_per_s,
-                    len(self.player.player_buffer),
+                    buffer_space / frames_in_chunk,
                     1000.0 * self.receiver.stat_network_latency,
                     1000.0 * self.stat_total_delay/cnt,
                     self.stat_drops,
@@ -805,9 +775,9 @@ def _parse_arguments():
                      dest="latency_msec",
                      metavar="MSEC",
                      action="store",
-                     default=1500,
+                     default=1000,
                      type=int,
-                     help="assumed system latency in miliseconds")
+                     help="time to synchronize the outputs in miliseconds (default 1000)")
 
     snd.add_argument("--payload-size",
                      metavar="BYTES",
@@ -864,15 +834,15 @@ def _parse_arguments():
                      metavar="MSEC",
                      action="store",
                      type=int,
-                     default=20,
-                     help="play error tolerance (default 25ms)")
+                     default=15,
+                     help="play error tolerance (default 15ms)")
 
     rcv.add_argument("--sink-latency",
                      dest="sink_latency_msec",
                      metavar="MSEC",
                      action="store",
                      type=int,
-                     default=30,
+                     default=0,
                      help="sink latency")
 
     opt.add_argument("--channel",
@@ -976,15 +946,14 @@ def start_rx(args, loop, time_machine):
                                                local_addr=channel)
 
     # Corouting pumping audio into PA
-    player = Player(device_index=0)
-    pump = AudioPump(receiver, player,
-                     tolerance=args.tolerance_msec / 1000.0,
-                     sink_latency=args.sink_latency_msec / 1000.0)
+    player = ChunkPlayer(receiver,
+                         tolerance=args.tolerance_msec / 1000.0,
+                         sink_latency=args.sink_latency_msec / 1000.0,
+                         device_index=0)
 
-    play = player.player()
-    pump = pump.pump()
+    play = player.chunk_player()
 
-    tasks = asyncio.gather(connection, pump, play)
+    tasks = asyncio.gather(connection, play)
     #asyncio.async(connection)
     #asyncio.async(pump)
     loop.run_until_complete(tasks)
