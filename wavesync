@@ -11,8 +11,8 @@ Unix socket/sound source
 Receiver pipeline:
 Socket
   ---  UDP datagrams  ---> [Receiver]
-  --- chunks/commands ---> [Player]
-  ---> Unix socket/sound sink
+  --- chunks/commands ---> [ChunkPlayer]
+  ---> pyaudio sink stream
 """
 from time import time
 import struct
@@ -25,7 +25,7 @@ import asyncio
 
 from collections import deque
 
-VERSION=(0, 4, 0)
+VERSION=(0, 5, 0)
 
 class TimeMachine:
     """
@@ -66,7 +66,6 @@ class SampleReader(asyncio.Protocol):
 
     # Number of empty chunks before silence is detected.
     SILENCE_TRESHOLD = 10
-
     HEADER_SIZE = 4
 
     def __init__(self):
@@ -202,7 +201,7 @@ class Packetizer:
 
         IP_PMTUDISC_DO = 2
         IP_MTU_DISCOVER = 10
-        #IP_MTU = 14
+
         # Set DF flag on IP packet (Don't Fragment) - fragmenting would be bad idea
         # it's way better to chunk the packets right.
         self.sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
@@ -476,7 +475,8 @@ class ChunkPlayer:
     "Play received audio and keep sync"
 
     def __init__(self, receiver, tolerance,
-                 sink_latency, device_index):
+                 sink_latency,
+                 buffer_size, device_index):
         # Our data source
         self.receiver = receiver
 
@@ -486,8 +486,8 @@ class ChunkPlayer:
 
         # Audio state
         self.audio_cfg = None
+        self.buffer_size = buffer_size
         self.device_index = device_index
-
         self.stream = None
 
         # Generate silence frames (zeroed) of appropriate sizes for chunks
@@ -497,7 +497,8 @@ class ChunkPlayer:
         self.silence_to_insert = 0
 
         # Stats
-        self.stat_drops = 0
+        self.stat_time_drops = 0
+        self.stat_output_drops = 0
         self.stat_total_delay = 0
 
     def clear_state(self):
@@ -513,75 +514,6 @@ class ChunkPlayer:
         silent_chunk = b'\x00' * self.audio_cfg['chunk_size']
         self.silence_cache = silent_chunk
         return silent_chunk
-
-
-    def OBSOLETE_play_loop(self, stream, frame_size):
-        "Player loop, executed after the device is opened."
-        recent = 0
-        recent_start = time()
-
-        stat_silence = 0
-        stat_audio = 0
-
-        #
-        MIN_WRITE = frame_size * 400
-
-        # Chunk interval
-        chunk_delay = (
-            self.audio_cfg['chunk_size'] / frame_size *
-            (1 / self.audio_cfg['rate'])
-        )
-        print("Chunk delay", chunk_delay * 1000)
-
-        while True:
-            #t = time()
-            # Limit the maximum speed of this loop
-            yield from asyncio.sleep(chunk_delay)
-            #print("TOOK", (time() - t) * 1000)
-            if self.audio_state != self.AUDIO_PLAY:
-                # Quit play loop
-                print("State=%d - quit play loop", self.audio_state)
-                return
-
-            buffer_space = stream.get_write_available() * frame_size
-            bytes_available = len(self.player_buffer)
-
-            if buffer_space < MIN_WRITE:
-                #print("Wait buffer", len(self.receiver.chunk_list), len(self.player_buffer))
-                #print("<%5d  %5d" % (buffer_space, bytes_available))
-                #print("Min write", buffer_space)
-                #yield from asyncio.sleep(5/1000)
-                #continue
-                pass
-
-            if bytes_available == 0:
-                wait = (1/self.audio_cfg['rate'] * (MIN_WRITE-bytes_available))
-                #print("SLE", wait)
-                #print(" %5d <%5d - wait:%.4fms" % (buffer_space, bytes_available, wait*1000))
-                yield from asyncio.sleep(2 * chunk_delay)
-
-                #yield from asyncio.sleep(wait)
-                continue
-
-            print(" %5d  %5d OK" % (buffer_space, bytes_available))
-
-            to_write = self.player_buffer[:buffer_space]
-            self.player_buffer = self.player_buffer[buffer_space:]
-
-            stream.write(to_write)
-            recent += len(to_write)
-
-            if recent > 200000:
-                recent_took = time() - recent_start
-                bytes_per_s = recent / recent_took
-
-                s = "PLAYER: bytes/s=%.2f queue=%d silence=%-4d (still=%d) audio=%-4d"
-                s = s % (bytes_per_s,
-                         len(self.player_buffer), stat_silence, self.silence_to_insert,
-                         stat_audio)
-                recent = 0
-                recent_start = time()
-                print(s)
 
     def _open_stream(self):
         import pyaudio
@@ -600,7 +532,7 @@ class ChunkPlayer:
             frame_size = 2 * cfg['channels']
             format = pyaudio.paInt16
 
-        frames_per_buffer = 4096 * 2
+        frames_per_buffer = self.buffer_size
 
         queue_l = 1/cfg['rate'] * frames_per_buffer
         print("Output queue length is %.2fms" % (queue_l * 1000))
@@ -688,11 +620,11 @@ class ChunkPlayer:
                 over = -delay
                 prob = over / self.tolerance
                 if random.random() < prob:
-                    s = "chunk_q=%d. Drop chunk: delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
+                    s = "Drop chunk: q_len=%2d delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
                     s = s % (len(self.receiver.chunk_list),
                              delay*1000, -self.tolerance*1000, prob)
                     print(s)
-                    self.stat_drops += 1
+                    self.stat_time_drops += 1
                     continue
             elif delay > (5 + self.sink_latency):
                 # Probably we hanged for so long time that the time recovering 
@@ -704,16 +636,15 @@ class ChunkPlayer:
             # If chunk is in the future - wait until it's within the tolerance
             elif delay > self.tolerance:
                 to_wait = delay - self.tolerance / 2
-                #print("FUTURE WAIT", to_wait * 1000)
                 yield from asyncio.sleep(to_wait)
 
 
-            # PLAY HERE.
-
-            # If the write would block - drop the chunk to resync.
+            # If the write would block on output stream - drop the chunk to resync.
             buffer_space = self.stream.get_write_available()
             if buffer_space < self.chunk_frames:
-                print("WOULD BLOCK - drop", buffer_space)
+                # TODO: If within tolerance - wait a bit instead of dropping
+                print("Drop chunk: output stream full")
+                self.stat_output_drops += 1
                 yield from asyncio.sleep(1/1000)
             else:
                 self.stream.write(chunk)
@@ -724,16 +655,22 @@ class ChunkPlayer:
                 latency = self.stream.get_output_latency()
                 frames_in_chunk = len(chunk) / self.frame_size
 
-                s = ("STATUS: chunks: q=%-3d buf_space_chunks=%3.1f "
-                     "net latency: %-5.1fms "
-                     "avg_delay=%-5.2f drops: time=%d net=%d")
+                took = time() - recent_start
+                chunks_per_s = recent / took
+
+                s = ("STAT: chunks: q_len=%-3d bs=%3.1f "
+                     "ch/s=%4.2f "
+                     "net lat: %-5.1fms "
+                     "avg_delay=%-5.2f drops: time=%d net=%d out=%d")
                 s = s % (
                     len(self.receiver.chunk_list),
                     buffer_space / frames_in_chunk,
+                    chunks_per_s,
                     1000.0 * self.receiver.stat_network_latency,
                     1000.0 * self.stat_total_delay/cnt,
-                    self.stat_drops,
-                    self.receiver.stat_network_drops
+                    self.stat_time_drops,
+                    self.receiver.stat_network_drops,
+                    self.stat_output_drops,
                 )
                 print(s)
 
@@ -741,9 +678,11 @@ class ChunkPlayer:
 
                 # Warnings
                 if self.receiver.stat_network_latency > 4:
-                    print("WARNING: Your network latency seems HUGE. Are the clocks synchronized?")
+                    print("WARNING: Your network latency seems HUGE. "
+                          "Are the clocks synchronised?")
                 elif self.receiver.stat_network_latency < 0:
-                    print("WARNING: You either exceeded the speed of light or have unsynchronised clocks")
+                    print("WARNING: You either exceeded the speed of "
+                          "light or have unsynchronised clocks")
 
 
 def _parse_arguments():
@@ -752,7 +691,7 @@ def _parse_arguments():
 
     version = ".".join(str(p) for p in VERSION)
 
-    dst="WaveSync %s - multi-room sound synchronization system"
+    dst="WaveSync %s - multi-room sound synchronisation"
     dst = dst % version
     p = argparse.ArgumentParser(description=dst)
     snd = p.add_argument_group('sender options')
@@ -777,27 +716,28 @@ def _parse_arguments():
                      action="store",
                      default=1000,
                      type=int,
-                     help="time to synchronize the outputs in miliseconds (default 1000)")
+                     help="time to synchronise the outputs in milliseconds (default 1000)")
 
     snd.add_argument("--payload-size",
                      metavar="BYTES",
                      action="store",
                      type=int,
-                     default=1500 - 80,
-                     help="UDP payload size, 1420 is the safe default")
+                     default=1472, # although 1500 - 80 would be safer.
+                     help="UDP payload size, (default is 1472)")
 
     snd.add_argument("--ttl",
                      metavar="TTL",
                      action="store",
                      type=int,
                      default=2,
-                     help="multicast TTL")
+                     help="multicast TTL (default 2)")
 
     snd.add_argument("--compress",
+                     metavar="LEVEL",
                      action="store",
                      default=False,
                      type=int,
-                     help="compression level (1-9))")
+                     help="enable compression (level 1-9)")
 
     snd.add_argument("--no-loop",
                      dest="multicast_loop",
@@ -807,7 +747,7 @@ def _parse_arguments():
 
     snd.add_argument("--broadcast",
                      action="store_true",
-                     help="Use transmission to broadcast target")
+                     help="Use broadcast transmission")
 
     snd.add_argument("--rate",
                      dest="audio_rate",
@@ -844,6 +784,20 @@ def _parse_arguments():
                      type=int,
                      default=0,
                      help="sink latency")
+
+    rcv.add_argument("--buffer-size",
+                     metavar="FRAMES",
+                     action="store",
+                     type=int,
+                     default=8192,
+                     help="size of local output buffer in frames (default 8192)")
+
+    rcv.add_argument("--device-index",
+                     metavar="NUMBER",
+                     action="store",
+                     type=int,
+                     default=0,
+                     help="audio device index for playback (default 0)")
 
     opt.add_argument("--channel",
                      dest="ip_list",
@@ -949,7 +903,8 @@ def start_rx(args, loop, time_machine):
     player = ChunkPlayer(receiver,
                          tolerance=args.tolerance_msec / 1000.0,
                          sink_latency=args.sink_latency_msec / 1000.0,
-                         device_index=0)
+                         buffer_size=args.buffer_size,
+                         device_index=args.device_index)
 
     play = player.chunk_player()
 
