@@ -5,26 +5,23 @@ The goal is achieving a perfectly synchronised multi-room playback over the loca
 area networks (Ethernet or Wi-Fi) using cheap components and no additional
 cables. Main features:
 - Receives a "combined" audio stream from PulseAudio over a Unix socket,
-- chunks the audio, labels with timestamp and transmits over the network using
-  the multicast, broadcast or unicast addressing to multiple receivers,
-- and then gathers audio on receivers and plays it using PyAudio (direct ALSA,
-  or PulseAudio output).
-- detects the silence and stops flooding the network.
+- chunks the audio, labels with timestamp and transmits over the network,
+- then gathers audio on receivers and plays it using PyAudio (direct ALSA, or
+  PulseAudio output).
+- It's relatively trivial to setup and doesn't have exotic dependencies.
 
-
-### Notes:
+### Additionally
 
 - Tested with RaspberryPI (Kodi and Mopidy players) and 4 receivers (rpi3
-  (self), rpi2 over wifi, tethered Linux desktop, Linux laptop over Wifi).
-- worked over a shaky wireless using cheap USB Wi-Fi adapters - using unicast
-  transmission,
-- works with Debian Stable/Raspbian Python without compiling external dependencies,
-- uses graceful probabilistic packet drop to sync when lagging behind,
-- has only one dependency - pyaudio, and therefore receivers should work also
-  with Microsoft Windows (I did not test it).
-- inserts intermittent silence chunks on packet drops to gracefully sync playback,
-- requires NTP time synchronisation,
-- increases audio latency, not suitable for gaming and requires A-V correction
+  (self), rpi2 with cheap-USB-WiFi, tethered Linux desktop, Linux laptop over
+  Wifi).
+- Works with multicast, unicast or broadcast transmission.
+- Detects the silence and stops flooding the network.
+- Works with Debian Stable/Raspbian Python 3 without compiling external
+  dependencies (depends only on python3-pyaudio).
+- Drops chunks gracefully to sync back when lagging behind.
+- Requires NTP time synchronisation.
+- Increases audio latency, not suitable for gaming and requires A-V correction
   for movie playback.
 
 Configuration
@@ -37,7 +34,7 @@ Configuration
   - ntp
   - ntpstat
 
-1. Make sure NTP works correctly by calling ntpstat or ntptime:
+1. Make sure NTP works correctly with ntpstat or ntptime:
 
   ```
   # ntpstat
@@ -46,9 +43,9 @@ Configuration
      polling server every 1024 s
   ```
 
-  up to 130ms seems to be fine in my setup. Anything higher might cause
-  problems. Crucial is the time on the receivers. < 20ms or better should be
-  achievable locally.
+  Values 100-150ms seem to be OK with my setup. Anything much higher might cause
+  problems. Crucial is the time difference between the receivers. < 20ms or
+  better should be achievable locally.
 
 2. Configure PulseAudio UNIX socket source on sender. For example:
 
@@ -58,7 +55,11 @@ Configuration
   Add one line to the end of ~/.pulse/default.pa (without the backspace):
   load-module module-simple-protocol-unix rate=44100 format=s16le \
     channels=2 record=true source=0 socket=/tmp/music.source
+  and restart PulseAudio:
+  $ pulseaudio --kill && pulseaudio --start
   ```
+
+  Refer to PA docs for details.
 
 3. Install wavesync with git clone or pip3 install:
 
@@ -158,6 +159,26 @@ About every 1s a status packet is sent with sender time, a number of total sent
 packets and audio configuration. Receiver compares it to the packets received
 after the previous status and calculates the number of network-dropped packets.
 
+Tolerance
+---------
+
+```
+       Tolerance     range
+     /------------|------------\   Future
+  ----------------X-------------|--------------------------->
+                                |
+                               NOW
+  X = tolerance / 2
+```
+
+Wavesync gets the next chunk from the queue and calculates a delay between it's
+desired play time and the current time.
+- If the chunk play time is in future (delay > 1ms) - wait for it.
+- If the chunk is in past:
+  - delay between 0 and tolerance/2 - play,
+  - delay between tolerance/2 and tolerance - drop with rising probability,
+  - delay over tolerance - drop.
+
 Packet format
 -------------
 
@@ -186,11 +207,16 @@ Flags:
 - Bit 2: 0 - audio frame, 1 - status frame
 
   ```
-  Byte:  [3      -      11][12      -      16]
-  Label: [Sender Timestamp][Total chunks sent]
+  Byte:  [3      -      11][12      -      16][     +20 bytes     ]
+  Label: [Sender Timestamp][Total chunks sent][Audio Configuration]
   ```
 
-- Rest: Reserved :)
+  Audio configuration consists of:
+  - rate (uint16_t)
+  - sample size (uint8_t - value 16 or 24)
+  - channels (uint8_t) - 1, 2 or pretty much any value
+  - chunk_size (uint16_t)
+  - system latency (uint_16_t)
 
 
 Tips

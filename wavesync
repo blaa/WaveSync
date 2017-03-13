@@ -25,13 +25,13 @@ import asyncio
 
 from collections import deque
 
-VERSION=(0, 5, 0)
+VERSION=(1, 0, 0)
 
 class TimeMachine:
     """
-    Handle fast milisecond precision timestamps
+    Handle fast millisecond precision timestamps
 
-    `timemark' marks a time in future - certain number of miliseconds ahead of
+    `timemark' marks a time in future - certain number of milliseconds ahead of
     current time.
     """
     def get_timemark(self, latency):
@@ -384,7 +384,6 @@ class Receiver(asyncio.DatagramProtocol):
     def _handle_status(self, data):
         now = datetime.utcnow().timestamp()
 
-        # TODO: Change length for close fit.
         if len(data) < (2 + 20):
             print("WARNING: Status header too short")
 
@@ -394,17 +393,19 @@ class Receiver(asyncio.DatagramProtocol):
          channels,
          chunk_size,
          latency) = struct.unpack('dIHBBHH',
-                                  data[2:2+8+8+2+1+1+2+2])
+                                  data[2:2 + 8+4+2+1+1+2+2])
+
 
         # Handle timestamp
         self.stat_network_latency = (now - sender_timestamp)
 
-        # Handle audio config
+        # Handle audio configuration
         audio_cfg = {
             'rate': rate,
             'sample': sample,
             'channels': channels,
             'chunk_size': chunk_size,
+            'latency': latency,
         }
         if audio_cfg != self.current_audio_cfg:
             # If changed - sent further
@@ -511,7 +512,7 @@ class ChunkPlayer:
 
         # Stats
         self.stat_time_drops = 0
-        self.stat_output_drops = 0
+        self.stat_output_delays = 0
         self.stat_total_delay = 0
 
     def clear_state(self):
@@ -549,7 +550,8 @@ class ChunkPlayer:
         frames_per_buffer = self.buffer_size
 
         queue_l = 1/cfg['rate'] * frames_per_buffer
-        print("Output queue length is %.2fms" % (queue_l * 1000))
+        # That's untrue probably. There's probably more than one buffer (3 using ALSA I guess)
+        # print("Output queue length is %.2fms" % (queue_l * 1000))
 
         stream = self.pa.open(output=True,
                               channels=cfg['channels'],
@@ -578,6 +580,9 @@ class ChunkPlayer:
         # Chunk/s stat
         recent_start = time()
         recent = 0
+
+        mid_tolerance = self.tolerance / 2
+        one_msec = 1/1000.0
 
         while True:
             if len(self.receiver.chunk_list) == 0:
@@ -630,9 +635,9 @@ class ChunkPlayer:
             # Probabilistic drop of lagging chunks to get back on track.
             # Probability of drop is higher, the more chunk lags behind current
             # time. Similar to the RED algorithm in TCP congestion.
-            if delay < 0:
-                over = -delay
-                prob = over / self.tolerance
+            if delay < -mid_tolerance:
+                over = -delay - mid_tolerance
+                prob = over / mid_tolerance
                 if random.random() < prob:
                     s = "Drop chunk: q_len=%2d delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
                     s = s % (len(self.receiver.chunk_list),
@@ -640,29 +645,36 @@ class ChunkPlayer:
                     print(s)
                     self.stat_time_drops += 1
                     continue
-            elif delay > (2 + self.sink_latency + self.latency):
-                # Probably we hanged for so long time that the time recovering 
+            elif delay > (2 + self.sink_latency + self.audio_cfg['latency']):
+                # Probably we hanged for so long time that the time recovering
                 # mechanism rolled over. Recover
                 print("Huge recovery")
                 self.clear_state()
                 continue
 
             # If chunk is in the future - wait until it's within the tolerance
-            elif delay > self.tolerance:
-                to_wait = delay - self.tolerance / 2
+            elif delay > one_msec:
+                to_wait = max(one_msec, delay - one_msec)
                 yield from asyncio.sleep(to_wait)
 
 
-            # If the write would block on output stream - drop the chunk to resync.
-            buffer_space = self.stream.get_write_available()
-            if buffer_space < self.chunk_frames:
-                # TODO: If within tolerance - wait a bit instead of dropping
-                print("Drop chunk: output stream full")
-                self.stat_output_drops += 1
-                yield from asyncio.sleep(1/1000)
-            else:
+            # Wait until we can write chunk into output buffer. This might
+            # delay us too much - the probabilistic dropping mechanism will kick
+            # in.
+            times = 0
+            while True:
+                buffer_space = self.stream.get_write_available()
+                if buffer_space < self.chunk_frames:
+                    self.stat_output_delays += 1
+                    yield from asyncio.sleep(max(one_msec, delay))
+                    times += 1
+                    if times > 100:
+                        print("Hey, the output is STUCK!")
+                        yield from asyncio.sleep(1)
+                        break
+                    continue
                 self.stream.write(chunk)
-
+                break
 
             # Main status line
             if recent > 200:
@@ -672,10 +684,10 @@ class ChunkPlayer:
                 took = time() - recent_start
                 chunks_per_s = recent / took
 
-                s = ("STAT: chunks: q_len=%-3d bs=%3.1f "
+                s = ("STAT: chunks: q_len=%-3d bs=%4.1f "
                      "ch/s=%5.1f "
                      "net lat: %-5.1fms "
-                     "avg_delay=%-5.2f drops: time=%d net=%d out=%d")
+                     "avg_delay=%-5.2f drops: time=%d net=%d out_delay=%d")
                 s = s % (
                     len(self.receiver.chunk_list),
                     buffer_space / frames_in_chunk,
@@ -684,7 +696,7 @@ class ChunkPlayer:
                     1000.0 * self.stat_total_delay/cnt,
                     self.stat_time_drops,
                     self.receiver.stat_network_drops,
-                    self.stat_output_drops,
+                    self.stat_output_delays,
                 )
                 print(s)
 
@@ -731,7 +743,7 @@ def _parse_arguments():
                      action="store",
                      default=1000,
                      type=int,
-                     help="time to synchronise the outputs in milliseconds (default 1000)")
+                     help="time to synchronise the outputs (default 1000). Pass to the receivers if over 2000")
 
     snd.add_argument("--payload-size",
                      metavar="BYTES",
@@ -841,6 +853,11 @@ def _parse_arguments():
     if args.sink_latency_msec > args.latency_msec:
         p.error("Sink latency cannot exceed system latency! Leave some margin too.")
 
+    if args.latency_msec >= 5000:
+        print("WARNING: You seem to be using large latency")
+    elif args.latency_msec >= 30000:
+        p.error("Latency shouldn't exceed 30s (in fact, it should work with latency < 5000).")
+
     if not args.ip_list:
         args.ip_list.append('224.0.0.57:45300')
 
@@ -925,8 +942,6 @@ def start_rx(args, loop, time_machine):
     play = player.chunk_player()
 
     tasks = asyncio.gather(connection, play)
-    #asyncio.async(connection)
-    #asyncio.async(pump)
     loop.run_until_complete(tasks)
 
 def main():

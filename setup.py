@@ -2,7 +2,7 @@
 
 from distutils.core import setup
 
-VERSION=(0, 5, 0)
+VERSION=(1, 0, 0)
 
 setup(name="wavesync",
       version=".".join(str(f) for f in VERSION),
@@ -14,7 +14,7 @@ setup(name="wavesync",
       scripts=['wavesync'],
       license="MIT",
       classifiers=[
-          "Development Status :: 4 - Beta",
+          "Development Status :: 5 - Production/Stable",
           "Topic :: Multimedia :: Sound/Audio",
           "Topic :: System :: Networking",
           "License :: OSI Approved :: MIT License",
