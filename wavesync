@@ -333,6 +333,9 @@ class Receiver(asyncio.DatagramProtocol):
 
         self.chunk_available = asyncio.Event()
 
+        # When doing huge recovery - ignore few cached, out-of-date packets
+        self.ignore_packets = 0
+
         self.stat_network_latency = 0
         self.stat_network_drops = 0
 
@@ -434,6 +437,9 @@ class Receiver(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         "Handle incoming datagram - audio chunk, or status packet"
+        if self.ignore_packets != 0:
+            self.ignore_packets -= 1
+            return
 
         header = data[:2]
         mark = data[2:4]
@@ -470,12 +476,17 @@ class Receiver(asyncio.DatagramProtocol):
         loop = asyncio.get_event_loop()
         loop.stop()
 
+    def do_recovery(self):
+        # 120 == about 1s in default configuration
+        self.ignore_packets = 120
+        self.last_sender_chunk_no = None
+        self.chunk_no = 0
 
 class ChunkPlayer:
     "Play received audio and keep sync"
 
     def __init__(self, receiver, tolerance,
-                 sink_latency,
+                 sink_latency, latency,
                  buffer_size, device_index):
         # Our data source
         self.receiver = receiver
@@ -483,6 +494,8 @@ class ChunkPlayer:
         # Configuration
         self.tolerance = tolerance
         self.sink_latency = sink_latency
+        # Only needed if latency in system exceeds 2s
+        self.latency = latency
 
         # Audio state
         self.audio_cfg = None
@@ -505,6 +518,7 @@ class ChunkPlayer:
         "Clear player queue"
         self.silence_to_insert = 0
         self.receiver.chunk_list.clear()
+        self.receiver.do_recovery()
 
     def get_silent_chunk(self):
         "Generate and cache silent chunks"
@@ -589,7 +603,7 @@ class ChunkPlayer:
             if cmd == self.receiver.CMD_DROPS:
                 if item > 200:
                     print("Recovering after a huge packet loss of %d packets" % item)
-                    self.player.clear_state()
+                    self.clear_state()
                 else:
                     # Just slowly resync
                     self.silence_to_insert += item
@@ -626,7 +640,7 @@ class ChunkPlayer:
                     print(s)
                     self.stat_time_drops += 1
                     continue
-            elif delay > (5 + self.sink_latency):
+            elif delay > (2 + self.sink_latency + self.latency):
                 # Probably we hanged for so long time that the time recovering 
                 # mechanism rolled over. Recover
                 print("Huge recovery")
@@ -659,7 +673,7 @@ class ChunkPlayer:
                 chunks_per_s = recent / took
 
                 s = ("STAT: chunks: q_len=%-3d bs=%3.1f "
-                     "ch/s=%4.2f "
+                     "ch/s=%5.1f "
                      "net lat: %-5.1fms "
                      "avg_delay=%-5.2f drops: time=%d net=%d out=%d")
                 s = s % (
@@ -675,6 +689,7 @@ class ChunkPlayer:
                 print(s)
 
                 recent = 0
+                recent_start = time()
 
                 # Warnings
                 if self.receiver.stat_network_latency > 4:
@@ -903,6 +918,7 @@ def start_rx(args, loop, time_machine):
     player = ChunkPlayer(receiver,
                          tolerance=args.tolerance_msec / 1000.0,
                          sink_latency=args.sink_latency_msec / 1000.0,
+                         latency=args.latency_msec / 1000.0,
                          buffer_size=args.buffer_size,
                          device_index=args.device_index)
 
