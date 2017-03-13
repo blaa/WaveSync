@@ -2,7 +2,7 @@
 
 from distutils.core import setup
 
-VERSION=(1, 0, 0)
+VERSION=(1, 0, 1)
 
 setup(name="wavesync",
       version=".".join(str(f) for f in VERSION),
@@ -12,6 +12,7 @@ setup(name="wavesync",
       url="https://github.com/blaa/WaveSync",
       keywords="multi-room synchronised audio playback raspberrypi pulseaudio",
       scripts=['wavesync'],
+      install_requires=['pyaudio>=0.2.8'],
       license="MIT",
       classifiers=[
           "Development Status :: 5 - Production/Stable",
