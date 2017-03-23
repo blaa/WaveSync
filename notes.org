@@ -1,6 +1,11 @@
 Random project Notes
 
 * TODOs
+** Consider volume control from the master
+** Consider splitting the channels to get 5.1 without cables.
+   e.g. play 2.1 directly (stereo + subwoofer),
+   play center + sides over wifi.
+
 ** TODO Implement packet reordering upon arrival
    Still doesn't seem needed over my crazy LAN. Will wait for requests. I've
    noticed problem with duplicated packets. Not very problematic but numbering
@@ -56,6 +61,8 @@ Random project Notes
   - add miliseconds: 29123
   This gives range from 0 to 59999 and fits 16 bits.
 
+  Closer to -30000 - 30000 in fact if taking into account lagging chunks.
+
 ** Upon reception we might have:
 
   ------|minute start|-------|now|------|minute end|-------
@@ -74,3 +81,8 @@ Random project Notes
                                              ^ - ABSOLUTE HERE
 
   This two cases allow to reassemble the absolute time.
+
+  Note: In cases of not synchronised time or great lags on packet reception I've
+  added additional two cases for handling mark in the past. This reduces the
+  mark resolution to 30 seconds into the future and 30 seconds into the past -
+  well enough for practical solutions.

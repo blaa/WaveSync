@@ -25,7 +25,7 @@ import asyncio
 
 from collections import deque
 
-VERSION=(1, 0, 1)
+VERSION=(1, 0, 3)
 
 class TimeMachine:
     """
@@ -49,13 +49,35 @@ class TimeMachine:
         second = mark // 1000
         microsecond = (mark % 1000) * 1000
 
-        now = datetime.utcnow()
-        if now.second > second:
-            # next minute
-            now = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        orig_now = now
+
+        """
+        Full cases in case time is not synchronised correctly in the network.
+        ns           s
+        now.second | second | solution     | Why
+        0          | 1      | same minute  | s > ns, s-ns < 30
+        0          | 59     | prev minute  | s > ns, s-ns > 30
+        59         | 1      | next minute  | s < ns, ns-s > 30
+        59         | 50     | same minute  | s < ns, ns-s < 30
+        """
+
+        if second > now.second:
+            d = second - now.second
+            if d < 30:
+                # Same minute
+                pass
+            else:
+                # Prev minute, won't be playing that I guess anyway
+                now = now.replace(second=0, microsecond=0) + timedelta(minutes=-1)
         else:
-            # this minute
-            pass
+            d = now.second - second
+            if d > 30:
+                # next minute
+                now = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            else:
+                # same minute
+                pass
+
         absolute_mark = now.replace(second=second, microsecond=microsecond)
 
         return absolute_mark.timestamp()
@@ -65,7 +87,7 @@ class SampleReader(asyncio.Protocol):
     """Read samples over the network, chunk them and put into a queue"""
 
     # Number of empty chunks before silence is detected.
-    SILENCE_TRESHOLD = 10
+    SILENCE_TRESHOLD = 20
     HEADER_SIZE = 4
 
     def __init__(self):
@@ -116,20 +138,21 @@ class SampleReader(asyncio.Protocol):
                     # Still silence
                     continue
 
-            # Heuristic detection of silence start
-            if chunk[0] == 0 and chunk[-1] == 0:
-                self.silence_detect += 1
             else:
-                self.silence_detect = 0
-
-            # Silence too long - stop transmission
-            if self.silence_detect > self.SILENCE_TRESHOLD:
-                if any(chunk): # Accurate check
-                    self.silence_detect = 0
+                # Heuristic detection of silence start
+                if chunk[0] == 0 and chunk[-1] == 0:
+                    self.silence_detect += 1
                 else:
-                    print("Silence - start")
-                    self.silence_detect = True
-                    continue
+                    self.silence_detect = 0
+
+                # Silence too long - stop transmission
+                if self.silence_detect > self.SILENCE_TRESHOLD:
+                    if any(chunk): # Accurate check
+                        self.silence_detect = 0
+                    else:
+                        print("Silence - start")
+                        self.silence_detect = True
+                        continue
 
             self.sample_queue.put_nowait(chunk)
 
@@ -217,7 +240,7 @@ class Packetizer:
                                     self.audio_cfg['sample'],
                                     self.audio_cfg['channels'],
                                     self.reader.get_chunk_size(),
-                                    self.audio_cfg['latency']
+                                    self.audio_cfg['latency_msec']
         )
         return dgram
 
@@ -279,6 +302,7 @@ class Packetizer:
             # Send small status datagram every 124 chunks - ~ 1 second
             # It's used to determine if some frames were lost on the network
             # and therefore if output buffer resync is required.
+            # Contains the audio configuration too.
             if chunk_no % 124 == 0:
                 dgram = self._create_status_packet(chunk_no)
                 for destination in self.destinations:
@@ -334,7 +358,7 @@ class Receiver(asyncio.DatagramProtocol):
         self.chunk_available = asyncio.Event()
 
         # When doing huge recovery - ignore few cached, out-of-date packets
-        self.ignore_packets = 0
+        self.ignore_audio_packets = 0
 
         self.stat_network_latency = 0
         self.stat_network_drops = 0
@@ -405,7 +429,7 @@ class Receiver(asyncio.DatagramProtocol):
             'sample': sample,
             'channels': channels,
             'chunk_size': chunk_size,
-            'latency': latency,
+            'latency_msec': latency,
         }
         if audio_cfg != self.current_audio_cfg:
             # If changed - sent further
@@ -436,12 +460,9 @@ class Receiver(asyncio.DatagramProtocol):
             self.chunk_list.append((self.CMD_DROPS, dropped))
             self.chunk_available.set()
 
+
     def datagram_received(self, data, addr):
         "Handle incoming datagram - audio chunk, or status packet"
-        if self.ignore_packets != 0:
-            self.ignore_packets -= 1
-            return
-
         header = data[:2]
         mark = data[2:4]
         chunk = data[4:]
@@ -460,6 +481,11 @@ class Receiver(asyncio.DatagramProtocol):
         else:
             print("Invalid header!")
             return
+
+        if self.ignore_audio_packets != 0:
+            self.ignore_audio_packets -= 1
+            return
+
         mark = self.time_machine.to_absolute_timestamp(mark)
         item = (mark, chunk)
 
@@ -478,8 +504,9 @@ class Receiver(asyncio.DatagramProtocol):
         loop.stop()
 
     def do_recovery(self):
-        # 120 == about 1s in default configuration
-        self.ignore_packets = 120
+        "Flush the incoming, and probably stale, UDP buffer"
+        # 60 == about 0.5s in default configuration
+        self.ignore_audio_packets = 60
         self.last_sender_chunk_no = None
         self.chunk_no = 0
 
@@ -518,7 +545,18 @@ class ChunkPlayer:
     def clear_state(self):
         "Clear player queue"
         self.silence_to_insert = 0
+
+        # Clear the chunk list, but preserve CFG commands
+        cfg = None
+        for cmd, item in self.receiver.chunk_list:
+            if cmd == self.receiver.CMD_CFG:
+                cfg = item
+                break
+
         self.receiver.chunk_list.clear()
+        if cfg is not None:
+            self.receiver.chunk_list.append((self.receiver.CMD_CFG, cfg))
+
         self.receiver.do_recovery()
 
     def get_silent_chunk(self):
@@ -584,14 +622,22 @@ class ChunkPlayer:
         mid_tolerance = self.tolerance / 2
         one_msec = 1/1000.0
 
+        max_delay = 5
+
         while True:
             if len(self.receiver.chunk_list) == 0:
+
                 if self.audio_cfg is not None:
                     print("Queue empty - waiting")
+
                 self.receiver.chunk_available.clear()
                 yield from self.receiver.chunk_available.wait()
+
                 recent_start = time()
                 recent = 0
+                if self.audio_cfg is not None:
+                    yield from asyncio.sleep(self.audio_cfg['latency_msec'] / 1000 / 4)
+                    print("Got stream flowing. q_len=%d" % len(self.receiver.chunk_list))
                 continue
 
             cmd, item = self.receiver.chunk_list.popleft()
@@ -603,9 +649,11 @@ class ChunkPlayer:
                 if self.stream:
                     self._close_stream()
                 self._open_stream()
+                # Calculate maximum sensible delay in given configuration
+                max_delay = (0.2 + self.sink_latency + self.audio_cfg['latency_msec'] / 1000)
+                print("Assuming maximum chunk delay of %.2fms in this setup" % (max_delay * 1000))
                 continue
-
-            if cmd == self.receiver.CMD_DROPS:
+            elif cmd == self.receiver.CMD_DROPS:
                 if item > 200:
                     print("Recovering after a huge packet loss of %d packets" % item)
                     self.clear_state()
@@ -645,10 +693,12 @@ class ChunkPlayer:
                     print(s)
                     self.stat_time_drops += 1
                     continue
-            elif delay > (2 + self.sink_latency + self.audio_cfg['latency']):
+
+            elif delay > max_delay:
                 # Probably we hanged for so long time that the time recovering
                 # mechanism rolled over. Recover
-                print("Huge recovery")
+                print("Huge recovery - delay of %.2f exceeds the max delay of %.2f" % (
+                    delay, max_delay))
                 self.clear_state()
                 continue
 
@@ -859,8 +909,8 @@ def _parse_arguments():
 
     if args.latency_msec >= 5000:
         print("WARNING: You seem to be using large latency")
-    elif args.latency_msec >= 30000:
-        p.error("Latency shouldn't exceed 30s (in fact, it should work with latency < 5000).")
+    elif args.latency_msec >= 29000:
+        p.error("Latency shouldn't exceed 29s (in fact, it should work with latency < 5000).")
 
     if not args.ip_list:
         args.ip_list.append('224.0.0.57:45300')
@@ -895,7 +945,7 @@ def start_tx(args, loop, time_machine):
         'rate': args.audio_rate,
         'sample': 24 if args.audio_sample else 16,
         'channels': args.audio_channels,
-        'latency': args.latency_msec,
+        'latency_msec': args.latency_msec,
     }
 
     # Sound sample reader
@@ -947,6 +997,7 @@ def start_rx(args, loop, time_machine):
 
     tasks = asyncio.gather(connection, play)
     loop.run_until_complete(tasks)
+
 
 def main():
     "Parse arguments and start the event loop"

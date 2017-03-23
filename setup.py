@@ -2,7 +2,7 @@
 
 from distutils.core import setup
 
-VERSION=(1, 0, 1)
+VERSION=(1, 0, 3)
 
 setup(name="wavesync",
       version=".".join(str(f) for f in VERSION),
