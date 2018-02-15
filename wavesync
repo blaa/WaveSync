@@ -41,7 +41,7 @@ class TimeMachine:
         # Stamp ranges from 0 to 59999 - fits in uint16_t
         stamp = (stamp + latency) % 59999
         stamp = struct.pack('>H', stamp)
-        return stamp
+        return now.timestamp() + latency/1000, stamp
 
     def to_absolute_timestamp(self, mark):
         now = datetime.utcnow()
@@ -193,8 +193,10 @@ class Packetizer:
     HEADER_RAW_AUDIO = b'\x00\x00'
     HEADER_STATUS = b'\x40\x00'
 
-    def __init__(self, reader, time_machine, latency_msec, audio_cfg, compress=False):
+    def __init__(self, reader, time_machine,
+                 chunk_queue, latency_msec, audio_cfg, compress=False):
         self.reader = reader
+        self.chunk_queue = chunk_queue
         self.time_machine = time_machine
         self.latency_msec = latency_msec
         self.compress = compress
@@ -261,10 +263,24 @@ class Packetizer:
         recent_bytes = 0
         recent_start = time()
 
+        # For local playback
+        if self.chunk_queue:
+            cfg = self.audio_cfg.copy()
+            cfg['chunk_size'] = 1500
+            self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_CFG,
+                                                cfg))
+
         while True:
             # Block until samples are read by the reader.
             chunk = yield from self.reader.get_next_chunk()
-            mark = self.time_machine.get_timemark(self.latency_msec)
+            full_mark, mark = self.time_machine.get_timemark(self.latency_msec)
+
+            if self.chunk_queue:
+                item = (full_mark, chunk)
+                self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_AUDIO,
+                                                    item))
+                self.chunk_queue.chunk_available.set()
+
 
             chunk_len = len(chunk)
             if self.compress is not False:
@@ -331,6 +347,34 @@ class Packetizer:
                 recent_bytes = 0
                 recent = 0
 
+class ChunkQueue:
+    "Queue of packets"
+
+    CMD_AUDIO = 1
+    CMD_DROPS = 2
+    CMD_CFG = 3
+
+    def __init__(self):
+        # NOTE: On LAN an unsorted deque works for me. Might need
+        # a packet ordering based on time mark eventually.
+        self.chunk_list = deque()
+
+        self.chunk_available = asyncio.Event()
+
+        # When doing huge recovery - ignore few cached, out-of-date packets
+        self.ignore_audio_packets = 0
+
+    def init_queue(self):
+        self.chunk_no = 0
+        self.last_sender_chunk_no = None
+
+    def do_recovery(self):
+        "Flush the incoming, and probably stale, UDP buffer"
+        # 60 == about 0.5s in default configuration
+        self.ignore_audio_packets = 60
+        self.last_sender_chunk_no = None
+        self.chunk_no = 0
+
 
 class Receiver(asyncio.DatagramProtocol):
     """
@@ -341,24 +385,13 @@ class Receiver(asyncio.DatagramProtocol):
     - store in chunk list.
     """
 
-    CMD_AUDIO = 1
-    CMD_DROPS = 2
-    CMD_CFG = 3
-
-    def __init__(self, time_machine, channel):
+    def __init__(self, chunk_queue, time_machine, channel):
         # Store config
         self.channel = channel
 
         self.time_machine = time_machine
 
-        # NOTE: On LAN an unsorted deque works for me. Might need
-        # a packet ordering based on time mark eventually.
-        self.chunk_list = deque()
-
-        self.chunk_available = asyncio.Event()
-
-        # When doing huge recovery - ignore few cached, out-of-date packets
-        self.ignore_audio_packets = 0
+        self.chunk_queue = chunk_queue
 
         self.stat_network_latency = 0
         self.stat_network_drops = 0
@@ -380,8 +413,7 @@ class Receiver(asyncio.DatagramProtocol):
         octets = group.split('.')
 
         # Received audio chunk counter
-        self.chunk_no = 0
-        self.last_sender_chunk_no = None
+        self.chunk_queue.init_queue()
 
         if len(octets) != 4:
             multicast = False
@@ -419,6 +451,7 @@ class Receiver(asyncio.DatagramProtocol):
          latency) = struct.unpack('dIHBBHH',
                                   data[2:2 + 8+4+2+1+1+2+2])
 
+        q = self.chunk_queue
 
         # Handle timestamp
         self.stat_network_latency = (now - sender_timestamp)
@@ -433,33 +466,32 @@ class Receiver(asyncio.DatagramProtocol):
         }
         if audio_cfg != self.current_audio_cfg:
             # If changed - sent further
-            self.chunk_list.append((self.CMD_CFG, audio_cfg))
+            q.chunk_list.append((q.CMD_CFG, audio_cfg))
             self.current_audio_cfg = audio_cfg
 
         # Handle dropped packets
 
         # If this is first status packet
         # or low sender_chunk_no indicates that sender was restarted
-        if self.last_sender_chunk_no is None or sender_chunk_no < 1500:
-            self.last_sender_chunk_no = sender_chunk_no
-            self.chunk_no = 0
+        if q.last_sender_chunk_no is None or sender_chunk_no < 1500:
+            q.last_sender_chunk_no = sender_chunk_no
+            q.chunk_no = 0
             return
 
         # How many chunks were transmitted since previous status packet?
-        chunks_sent = sender_chunk_no - self.last_sender_chunk_no
-        dropped = chunks_sent - self.chunk_no
+        chunks_sent = sender_chunk_no - q.last_sender_chunk_no
+        dropped = chunks_sent - q.chunk_no
 
-        self.last_sender_chunk_no = sender_chunk_no
-        self.chunk_no = 0
+        q.last_sender_chunk_no = sender_chunk_no
+        q.chunk_no = 0
 
         self.stat_network_drops += dropped
         if dropped < 0:
             print("WARNING: More pkts received than sent! "
                   "You are receiving multiple streams or duplicates.")
         elif dropped > 0:
-            self.chunk_list.append((self.CMD_DROPS, dropped))
-            self.chunk_available.set()
-
+            q.chunk_list.append((self.CMD_DROPS, dropped))
+            q.chunk_available.set()
 
     def datagram_received(self, data, addr):
         "Handle incoming datagram - audio chunk, or status packet"
@@ -482,18 +514,18 @@ class Receiver(asyncio.DatagramProtocol):
             print("Invalid header!")
             return
 
-        if self.ignore_audio_packets != 0:
-            self.ignore_audio_packets -= 1
+        if self.chunk_queue.ignore_audio_packets != 0:
+            self.chunk_queue.ignore_audio_packets -= 1
             return
 
         mark = self.time_machine.to_absolute_timestamp(mark)
         item = (mark, chunk)
 
         # Count received audio-chunks
-        self.chunk_no += 1
+        self.chunk_queue.chunk_no += 1
 
-        self.chunk_list.append((self.CMD_AUDIO, item))
-        self.chunk_available.set()
+        self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_AUDIO, item))
+        self.chunk_queue.chunk_available.set()
 
     def error_received(self, exc):
         print('Error received:', exc)
@@ -503,20 +535,16 @@ class Receiver(asyncio.DatagramProtocol):
         loop = asyncio.get_event_loop()
         loop.stop()
 
-    def do_recovery(self):
-        "Flush the incoming, and probably stale, UDP buffer"
-        # 60 == about 0.5s in default configuration
-        self.ignore_audio_packets = 60
-        self.last_sender_chunk_no = None
-        self.chunk_no = 0
-
 class ChunkPlayer:
     "Play received audio and keep sync"
 
-    def __init__(self, receiver, tolerance,
+    def __init__(self, chunk_queue, receiver, tolerance,
                  sink_latency, latency,
                  buffer_size, device_index):
         # Our data source
+        self.chunk_queue = chunk_queue
+
+        # Required for showing unified stats.
         self.receiver = receiver
 
         # Configuration
@@ -548,16 +576,16 @@ class ChunkPlayer:
 
         # Clear the chunk list, but preserve CFG commands
         cfg = None
-        for cmd, item in self.receiver.chunk_list:
-            if cmd == self.receiver.CMD_CFG:
+        for cmd, item in self.chunk_queue.chunk_list:
+            if cmd == self.chunk_queue.CMD_CFG:
                 cfg = item
                 break
 
-        self.receiver.chunk_list.clear()
+        self.chunk_queue.chunk_list.clear()
         if cfg is not None:
-            self.receiver.chunk_list.append((self.receiver.CMD_CFG, cfg))
+            self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_CFG, cfg))
 
-        self.receiver.do_recovery()
+        self.chunk_queue.do_recovery()
 
     def get_silent_chunk(self):
         "Generate and cache silent chunks"
@@ -625,24 +653,24 @@ class ChunkPlayer:
         max_delay = 5
 
         while True:
-            if len(self.receiver.chunk_list) == 0:
+            if len(self.chunk_queue.chunk_list) == 0:
 
                 if self.audio_cfg is not None:
                     print("Queue empty - waiting")
 
-                self.receiver.chunk_available.clear()
-                yield from self.receiver.chunk_available.wait()
+                self.chunk_queue.chunk_available.clear()
+                yield from self.chunk_queue.chunk_available.wait()
 
                 recent_start = time()
                 recent = 0
                 if self.audio_cfg is not None:
                     yield from asyncio.sleep(self.audio_cfg['latency_msec'] / 1000 / 4)
-                    print("Got stream flowing. q_len=%d" % len(self.receiver.chunk_list))
+                    print("Got stream flowing. q_len=%d" % len(self.chunk_queue.chunk_list))
                 continue
 
-            cmd, item = self.receiver.chunk_list.popleft()
+            cmd, item = self.chunk_queue.chunk_list.popleft()
 
-            if cmd == self.receiver.CMD_CFG:
+            if cmd == self.chunk_queue.CMD_CFG:
                 print("Got new configuration - opening audio stream")
                 self.clear_state()
                 self.audio_cfg = item
@@ -653,7 +681,7 @@ class ChunkPlayer:
                 max_delay = (0.2 + self.sink_latency + self.audio_cfg['latency_msec'] / 1000)
                 print("Assuming maximum chunk delay of %.2fms in this setup" % (max_delay * 1000))
                 continue
-            elif cmd == self.receiver.CMD_DROPS:
+            elif cmd == self.chunk_queue.CMD_DROPS:
                 if item > 200:
                     print("Recovering after a huge packet loss of %d packets" % item)
                     self.clear_state()
@@ -688,7 +716,7 @@ class ChunkPlayer:
                 prob = over / mid_tolerance
                 if random.random() < prob:
                     s = "Drop chunk: q_len=%2d delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
-                    s = s % (len(self.receiver.chunk_list),
+                    s = s % (len(self.chunk_queue.chunk_list),
                              delay*1000, -self.tolerance*1000, prob)
                     print(s)
                     self.stat_time_drops += 1
@@ -734,18 +762,25 @@ class ChunkPlayer:
                 took = time() - recent_start
                 chunks_per_s = recent / took
 
+                if self.receiver is not None:
+                    network_latency = self.receiver.stat_network_latency
+                    network_drops = self.receiver.stat_network_drops
+                else:
+                    network_latency = 0
+                    network_drops = 0
+
                 s = ("STAT: chunks: q_len=%-3d bs=%4.1f "
                      "ch/s=%5.1f "
                      "net lat: %-5.1fms "
                      "avg_delay=%-5.2f drops: time=%d net=%d out_delay=%d")
                 s = s % (
-                    len(self.receiver.chunk_list),
+                    len(self.chunk_queue.chunk_list),
                     buffer_space / frames_in_chunk,
                     chunks_per_s,
-                    1000.0 * self.receiver.stat_network_latency,
+                    1000.0 * network_latency,
                     1000.0 * self.stat_total_delay/cnt,
                     self.stat_time_drops,
-                    self.receiver.stat_network_drops,
+                    network_drops,
                     self.stat_output_delays,
                 )
                 print(s)
@@ -754,12 +789,13 @@ class ChunkPlayer:
                 recent_start = time()
 
                 # Warnings
-                if self.receiver.stat_network_latency > 4:
-                    print("WARNING: Your network latency seems HUGE. "
-                          "Are the clocks synchronised?")
-                elif self.receiver.stat_network_latency < 0:
-                    print("WARNING: You either exceeded the speed of "
-                          "light or have unsynchronised clocks")
+                if self.receiver is not None:
+                    if self.receiver.stat_network_latency > 4:
+                        print("WARNING: Your network latency seems HUGE. "
+                              "Are the clocks synchronised?")
+                    elif self.receiver.stat_network_latency < 0:
+                        print("WARNING: You either exceeded the speed of "
+                              "light or have unsynchronised clocks")
 
 
 def _parse_arguments():
@@ -790,6 +826,11 @@ def _parse_arguments():
                      action="store_true",
                      default=False,
                      help="receive sound and play it")
+
+    snd.add_argument("--local-play",
+                     action="store_true",
+                     default=False,
+                     help="play sound as well as transmitting it")
 
     snd.add_argument("--latency",
                      dest="latency_msec",
@@ -952,12 +993,26 @@ def start_tx(args, loop, time_machine):
     sample_reader = SampleReader()
     sample_reader.set_chunk_size(args.payload_size, args.sample_size)
 
+    if args.local_play:
+        chunk_queue = ChunkQueue()
+        player = ChunkPlayer(chunk_queue,
+                             receiver=None,
+                             tolerance=args.tolerance_msec / 1000.0,
+                             sink_latency=args.sink_latency_msec / 1000.0,
+                             latency=args.latency_msec / 1000.0,
+                             buffer_size=args.buffer_size,
+                             device_index=args.device_index)
+        play = player.chunk_player()
+        asyncio.async(play)
+    else:
+        chunk_queue = None
+
     # Packet splitter / sender
     packetizer = Packetizer(sample_reader, time_machine,
+                            chunk_queue,
                             args.latency_msec,
                             audio_cfg=audio_cfg,
                             compress=args.compress)
-
 
     packetizer.create_socket(args.ip_list,
                              args.ttl,
@@ -978,7 +1033,9 @@ def start_rx(args, loop, time_machine):
 
     # Network receiver with it's connection
     channel = args.ip_list[0]
-    receiver = Receiver(time_machine,
+    chunk_queue = ChunkQueue()
+    receiver = Receiver(chunk_queue,
+                        time_machine,
                         channel=channel)
 
     connection = loop.create_datagram_endpoint(lambda: receiver,
@@ -986,7 +1043,7 @@ def start_rx(args, loop, time_machine):
                                                local_addr=channel)
 
     # Corouting pumping audio into PA
-    player = ChunkPlayer(receiver,
+    player = ChunkPlayer(chunk_queue, receiver,
                          tolerance=args.tolerance_msec / 1000.0,
                          sink_latency=args.sink_latency_msec / 1000.0,
                          latency=args.latency_msec / 1000.0,
@@ -1019,4 +1076,7 @@ def main():
         loop.close()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Quitting - user requested")
