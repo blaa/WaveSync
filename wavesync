@@ -25,7 +25,7 @@ import asyncio
 
 from collections import deque
 
-VERSION=(1, 1, 0)
+VERSION=(1, 1, 1)
 
 class TimeMachine:
     """
@@ -1003,7 +1003,7 @@ def start_tx(args, loop, time_machine):
                              buffer_size=args.buffer_size,
                              device_index=args.device_index)
         play = player.chunk_player()
-        asyncio.async(play)
+        asyncio.ensure_future(play)
     else:
         chunk_queue = None
 
@@ -1022,8 +1022,8 @@ def start_tx(args, loop, time_machine):
     connection = loop.create_unix_connection(lambda: sample_reader, args.tx)
 
     # Start loop
-    asyncio.async(packetizer.packetize())
-    asyncio.async(connection)
+    asyncio.ensure_future(packetizer.packetize())
+    asyncio.ensure_future(connection)
     loop.run_forever()
 
 
