@@ -41,6 +41,9 @@ class ChunkPlayer:
         # Stream
         self.pyaudio = None
 
+        # Used to quit main loop
+        self.stop = False
+
         # Calculated sizes
         self.frame_size = None
         self.chunk_frames = None
@@ -74,32 +77,35 @@ class ChunkPlayer:
     def _open_stream(self):
         import pyaudio
 
-        assert self.stream is None
-        self.pyaudio = pyaudio.PyAudio()
-
         self.clear_state()
 
         # Open stream
         cfg = self.audio_cfg
         if cfg['sample'] == 24:
             frame_size = 3 * cfg['channels']
-            format = pyaudio.paInt24
+            audio_format = pyaudio.paInt24
         else:
             frame_size = 2 * cfg['channels']
-            format = pyaudio.paInt16
+            audio_format = pyaudio.paInt16
 
         frames_per_buffer = self.buffer_size
 
-        stream = self.pyaudio.open(output=True,
-                                   channels=cfg['channels'],
-                                   rate=cfg['rate'],
-                                   format=format,
-                                   frames_per_buffer=frames_per_buffer,
-                                   output_device_index=self.device_index)
+        if self.device_index == -1:
+            # We are tested. Don't open stream, but calculate chunk_frames.
+            pass
+        else:
+            assert self.stream is None
+            self.pyaudio = pyaudio.PyAudio()
+            stream = self.pyaudio.open(output=True,
+                                       channels=cfg['channels'],
+                                       rate=cfg['rate'],
+                                       format=audio_format,
+                                       frames_per_buffer=frames_per_buffer,
+                                       output_device_index=self.device_index)
+            self.stream = stream
 
         self.frame_size = frame_size
         self.chunk_frames = self.audio_cfg['chunk_size'] / frame_size
-        self.stream = stream
 
     def _close_stream(self):
         self.stream.stop_stream()
@@ -123,7 +129,7 @@ class ChunkPlayer:
 
         max_delay = 5
 
-        while True:
+        while not self.stop:
             if not self.chunk_queue.chunk_list:
 
                 if self.audio_cfg is not None:

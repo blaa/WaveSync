@@ -25,9 +25,10 @@ class Packetizer:
         self.latency_msec = latency_msec
         self.compress = compress
         self.audio_cfg = audio_cfg
+        self.stop = False
 
         self.sock = None
-        self.destinations = None
+        self.destinations = []
 
     def create_socket(self, channels, ttl, multicast_loop, broadcast):
         "Create a UDP multicast socket"
@@ -95,7 +96,7 @@ class Packetizer:
             self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_CFG,
                                                 cfg))
 
-        while True:
+        while not self.stop:
             # Block until samples are read by the reader.
             chunk = yield from self.reader.get_next_chunk()
             full_mark, mark = self.time_machine.get_timemark(self.latency_msec)
@@ -105,7 +106,6 @@ class Packetizer:
                 self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_AUDIO,
                                                     item))
                 self.chunk_queue.chunk_available.set()
-
 
             chunk_len = len(chunk)
             if self.compress is not False:

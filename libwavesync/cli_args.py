@@ -127,6 +127,7 @@ def args_common(opt):
                      help="multicast group or a unicast address, "
                           "may be given multiple times with --tx")
 
+    # TODO: This can be currently calculated from other options.
     opt.add_argument("--sample-size",
                      metavar="BYTES",
                      action="store",
@@ -172,6 +173,9 @@ def parse():
         print("WARNING: You seem to be using large latency")
     elif args.latency_msec >= 29000:
         parser.error("Latency shouldn't exceed 29s (in fact, it should work with latency < 5000).")
+
+    if args.device_index < 0:
+        parser.error("Device index can't be negative")
 
     if not args.ip_list:
         args.ip_list.append('224.0.0.57:45300')

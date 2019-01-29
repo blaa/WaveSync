@@ -90,7 +90,7 @@ def start_rx(args, loop, time_machine):
                                                family=socket.AF_INET,
                                                local_addr=channel)
 
-    # Corouting pumping audio into PA
+    # Coroutine pumping audio into PA
     player = ChunkPlayer(chunk_queue, receiver,
                          tolerance=args.tolerance_msec / 1000.0,
                          sink_latency=args.sink_latency_msec / 1000.0,

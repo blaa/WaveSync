@@ -1,5 +1,6 @@
 import asyncio
 
+
 class SampleReader(asyncio.Protocol):
     """Read samples over the network, chunk them and put into a queue"""
 
