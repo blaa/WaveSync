@@ -17,10 +17,10 @@ from . import (
 async def mock_audio_generator(reader, packetizer, tx_player, rx_player):
     "Mock a unix socket, generate some 'audio' data."
     reader.connection_made(None)
-    sample = b'0x01' * 6000
+    sample = b'\x01' * 6000
 
     # Generate "audio"
-    for _ in range(0, 100):
+    for _ in range(0, 2000):
         reader.data_received(sample)
         await asyncio.sleep(0)
 
@@ -242,7 +242,11 @@ def mock_txrx():
     # Both played
     tx_player.stream.write.assert_called()
     rx_player.stream.write.assert_called()
+    print(rx_player.stream.write.call_count)
 
+    # TODO recheck after fixing time stream
+    assert rx_player.stream.write.call_count >= 1
+    assert tx_player.stream.write.call_count > 1000
 
 class WaveSyncTestCase(unittest.TestCase):
 

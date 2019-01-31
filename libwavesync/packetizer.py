@@ -72,8 +72,7 @@ class Packetizer:
                                     self.audio_cfg['latency_msec'])
         return dgram
 
-    @asyncio.coroutine
-    def packetize(self):
+    async def packetize(self):
         "Read pre-chunked samples from queue and send them over UDP"
         start = time()
         # Numer of sent packets
@@ -98,7 +97,7 @@ class Packetizer:
 
         while not self.stop:
             # Block until samples are read by the reader.
-            chunk = yield from self.reader.get_next_chunk()
+            chunk = await self.reader.get_next_chunk()
             full_mark, mark = self.time_machine.get_timemark(self.latency_msec)
 
             if self.chunk_queue:

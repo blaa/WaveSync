@@ -114,8 +114,7 @@ class ChunkPlayer:
         self.stream = None
 
 
-    @asyncio.coroutine
-    def chunk_player(self):
+    async def chunk_player(self):
         "Reads asynchronously chunks from the list and plays them"
 
         cnt = 0
@@ -136,12 +135,12 @@ class ChunkPlayer:
                     print("Queue empty - waiting")
 
                 self.chunk_queue.chunk_available.clear()
-                yield from self.chunk_queue.chunk_available.wait()
+                await self.chunk_queue.chunk_available.wait()
 
                 recent_start = time()
                 recent = 0
                 if self.audio_cfg is not None:
-                    yield from asyncio.sleep(self.audio_cfg['latency_msec'] / 1000 / 4)
+                    await asyncio.sleep(self.audio_cfg['latency_msec'] / 1000 / 4)
                     print("Got stream flowing. q_len=%d" % len(self.chunk_queue.chunk_list))
                 continue
 
@@ -210,7 +209,7 @@ class ChunkPlayer:
             # If chunk is in the future - wait until it's within the tolerance
             elif delay > one_msec:
                 to_wait = max(one_msec, delay - one_msec)
-                yield from asyncio.sleep(to_wait)
+                await asyncio.sleep(to_wait)
 
 
             # Wait until we can write chunk into output buffer. This might
@@ -221,11 +220,11 @@ class ChunkPlayer:
                 buffer_space = self.stream.get_write_available()
                 if buffer_space < self.chunk_frames:
                     self.stat_output_delays += 1
-                    yield from asyncio.sleep(max(one_msec, delay))
+                    await asyncio.sleep(max(one_msec, delay))
                     times += 1
                     if times > 100:
                         print("Hey, the output is STUCK!")
-                        yield from asyncio.sleep(1)
+                        await asyncio.sleep(1)
                         break
                     continue
                 self.stream.write(chunk)
