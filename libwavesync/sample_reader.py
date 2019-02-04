@@ -17,10 +17,31 @@ class SampleReader(asyncio.Protocol):
         # Initialized along the chunk_size
         self.chunk_size = None
         self.sample_size = None
+        self.rate = None
+        self.chunk_time = None
+
+        # Buffering before chunking
         self.buffer = None
 
-    def set_chunk_size(self, payload_size, sample_size):
+        # Tracking stream time.
+        self.stream_time = None
+
+    def _configure(self, chunk_size):
+        "Configure fields, given a new chunk_size"
+        self.chunk_size = chunk_size
+        # To fit always the same amount of both channels (to not swap them in case
+        # of a packet drop) ensure the amount of space is divisible by sample_size
+        self.chunk_size -= self.chunk_size % self.sample_size
+        samples_in_chunk = self.chunk_size / self.sample_size
+        self.chunk_time = samples_in_chunk / self.rate
+
+    def set_chunk_size(self, payload_size, sample_size, rate):
         "Calculate optimal chunk size"
+
+        # Required for MTU detection and time tracking
+        self.sample_size = sample_size
+        self.rate = rate
+
         # 1420 is max payload for UDP over 1500 MTU ethernet
         # 80 - max IP header (60) + UDP header.
         # 4 - our header / timestamp
@@ -28,14 +49,7 @@ class SampleReader(asyncio.Protocol):
         #       small as 20 bytes.
 
         # Remove our header from the max payload size
-        self.chunk_size = payload_size - self.HEADER_SIZE
-
-        # To fit always the same amount of both channels (to not swap them in case
-        # of a packet drop) ensure the amount of space is divisible by sample_size
-        self.chunk_size -= self.chunk_size % sample_size
-
-        # Required for MTU detection
-        self.sample_size = sample_size
+        self._configure(payload_size - self.HEADER_SIZE)
 
     def connection_made(self, transport):
         "Initialize stream buffer"
@@ -60,7 +74,6 @@ class SampleReader(asyncio.Protocol):
                 else:
                     # Still silence
                     continue
-
             else:
                 # Heuristic detection of silence start
                 if chunk[0] == 0 and chunk[-1] == 0:
@@ -75,6 +88,7 @@ class SampleReader(asyncio.Protocol):
                     else:
                         print("Silence - start")
                         self.silence_detect = True
+                        self.stream_time = None
                         continue
 
             self.sample_queue.put_nowait(chunk)
@@ -92,8 +106,7 @@ class SampleReader(asyncio.Protocol):
 
     def decrement_chunk_size(self):
         "Decrement chunk size and flush chunks currently in queue"
-        self.chunk_size -= 1
-        self.chunk_size -= self.chunk_size % self.sample_size
+        self._configure(self.chunk_size - 1)
         # Empty the queue
         while True:
             try:

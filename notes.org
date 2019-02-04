@@ -10,8 +10,15 @@ Random project Notes
    Still doesn't seem needed over my crazy LAN. Will wait for requests. I've
    noticed problem with duplicated packets. Not very problematic but numbering
    the packets in header would fix it and handle drops immediately.
-** DONE Convert receivers to use pyaudio (or sth) to minimize the latency
-   CLOSED: [2017-03-13 Mon 22:26]
+
+** TODO Track stream-time instead of arrival-time.
+   - Might fix desync on stream searching, jumping songs.
+   - Fill fix certain outputs when more data is pumped into input 
+     than really playable. For example a player can decode a local mp3 and push
+     it all into the buffer.
+
+** TODO Replace datetimes with UTC timestamps
+   Handling correct datetimes seems costly and overly complicated.
 
 ** REVERTED Idea: Insert silence every n-th chunk to make it less noticable
    CLOSED: [2017-02-26 Sun 18:55]
@@ -20,6 +27,9 @@ Random project Notes
 
    This seems to be not necessary for pyaudio where the output queue is much
    more controllable.
+** DONE Convert receivers to use pyaudio (or sth) to minimize the latency
+   CLOSED: [2017-03-13 Mon 22:26]
+
 ** DONE Queue getting empty case seems to need a closer look
    CLOSED: [2017-02-26 Sun 18:54]
    It caused desync due to output buffers having varying levels of fill. With
@@ -42,7 +52,7 @@ Random project Notes
    This shouldn't happen now with pressurised player. IO is moved further from
    this queue and player queue length is controlled.
 
-** CANCELLED Expand timemark from 2-byte to 3-bytes to cover whole hour
+** CANCELLED Expand timemark from 2-byte to 3-bytes to cover a whole hour
    CLOSED: [2017-02-25 Sat 23:08]
    Use it for warnings if the time seems out of acceptable range (anything over
    1 minute will be unacceptable).

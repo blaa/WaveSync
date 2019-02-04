@@ -1,17 +1,19 @@
 import sys
 import asyncio
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, MagicMock
 
 from . import (
-    TimeMachine,
     Packetizer,
     ChunkPlayer,
     ChunkQueue,
     SampleReader,
     Receiver,
-    cli_args
+    cli_args,
 )
+
+from . import time_machine as tm
 
 
 async def mock_audio_generator(reader, packetizer, tx_player, rx_player):
@@ -91,7 +93,7 @@ def mock_tx():
         'latency_msec': 1000,
     }
 
-    time_machine = TimeMachine()
+    tm = time_machine.TimeMachine()
 
     # Sound sample reader
     sample_reader = SampleReader()
@@ -154,7 +156,7 @@ async def mock_packets(packets, receiver, player):
 
 def mock_rx(packets):
     "Mocked RX pipeline"
-    time_machine = TimeMachine()
+    time_machine = tm.TimeMachine()
 
     # Network receiver with it's connection
     channel = ('0.0.0.0', 1234)
@@ -185,7 +187,7 @@ def mock_txrx():
         'latency_msec': 1000,
     }
 
-    time_machine = TimeMachine()
+    time_machine = tm.TimeMachine()
 
 
     ##
@@ -200,7 +202,7 @@ def mock_txrx():
 
     # Sound sample reader
     sample_reader = SampleReader()
-    sample_reader.set_chunk_size(payload_size=1000, sample_size=4)
+    sample_reader.set_chunk_size(payload_size=1000, sample_size=4, rate=44100)
 
     tx_packetizer = mock_packetizer(audio_cfg, sample_reader,
                                     time_machine, tx_chunk_queue)
@@ -242,7 +244,6 @@ def mock_txrx():
     # Both played
     tx_player.stream.write.assert_called()
     rx_player.stream.write.assert_called()
-    print(rx_player.stream.write.call_count)
 
     # TODO recheck after fixing time stream
     assert rx_player.stream.write.call_count >= 1
@@ -252,7 +253,7 @@ class WaveSyncTestCase(unittest.TestCase):
 
     def test_timemachine(self):
         "Test timemark generation"
-        time_machine = TimeMachine()
+        time_machine = tm.TimeMachine()
 
         def check(time):
             "Get timemark and convert it back. Check consistency"
@@ -267,6 +268,43 @@ class WaveSyncTestCase(unittest.TestCase):
 
         # Works up to 30s
         self.assertFalse(check(60000))
+
+    def test_new_timemachine(self):
+        "Test timemark generation"
+        def check(relative1, relative2, latency_ms):
+            """
+            Get timemark and convert it back to check consistency.
+
+            relative1 - time during tm creation
+            relative2 - time during ts extraction
+            """
+            mark = tm.get_timemark(relative1, latency_ms)
+            ts_recovered = tm.to_absolute_timestamp(relative2, mark)
+            diff = abs(relative1 + latency_ms/1000 - ts_recovered)
+            return diff < 0.001
+
+        relatives = [
+            # Exact interval
+            1549305460.0,
+
+            # Last moment of previous
+            1549305459.0,
+
+            # Next chunk
+            1549305510.0
+        ]
+        times = [2000, 5000, 25000]
+        for relative in relatives:
+            for time in times:
+                print("rel", relative, "time", time)
+                self.assertTrue(check(relative, relative-3, time))
+                self.assertTrue(check(relative, relative+0.2, time))
+                self.assertTrue(check(relative, relative+0.9, time))
+                self.assertTrue(check(relative, relative+1.8, time))
+
+        # Won't work, will assume next interval
+        self.assertFalse(check(relatives[0], relatives[0]+10, 3000))
+
 
     #def test_pipelines(self):
     #    "Test TX-RX pipeline"
