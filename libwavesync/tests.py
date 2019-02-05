@@ -73,9 +73,9 @@ def mock_chunk_player():
     return chunk_queue, player
 
 
-def mock_packetizer(audio_config, sample_reader, time_machine, chunk_queue):
+def mock_packetizer(audio_config, sample_reader, chunk_queue):
     # Packet splitter / sender
-    packetizer = Packetizer(sample_reader, time_machine,
+    packetizer = Packetizer(sample_reader,
                             chunk_queue,
                             audio_config,
                             compress=False)
@@ -117,16 +117,6 @@ def mock_txrx():
                                latency_ms=1000,
                                sink_latency_ms=0)
 
-    # # Transmitted configuration
-    # audio_cfg = {
-    #     'rate': 44100,
-    #     'sample': 24,
-    #     'channels': 2,
-    #     'latency_msec': 1000,
-    # }
-
-    time_machine = tm.TimeMachine()
-
     ##
     # Players
     ##
@@ -142,7 +132,7 @@ def mock_txrx():
     sample_reader.payload_size = 1000
 
     tx_packetizer = mock_packetizer(audio_config, sample_reader,
-                                    time_machine, tx_chunk_queue)
+                                    tx_chunk_queue)
 
     # Mock audio input
     task_tx_reader = mock_audio_generator(sample_reader,
@@ -157,7 +147,6 @@ def mock_txrx():
     channel = ('0.0.0.0', 1234)
 
     rx_receiver = Receiver(rx_chunk_queue,
-                           time_machine,
                            channel=channel,
                            sink_latency_ms=0)
 
@@ -188,24 +177,6 @@ def mock_txrx():
     assert tx_player.stream.write.call_count > 1000
 
 class WaveSyncTestCase(unittest.TestCase):
-
-    def test_timemachine(self):
-        "Test timemark generation"
-        time_machine = tm.TimeMachine()
-
-        def check(time):
-            "Get timemark and convert it back. Check consistency"
-            ts, mark = time_machine.get_timemark(time)
-            ts_recovered = time_machine.to_absolute_timestamp(mark)
-            diff = abs(ts - ts_recovered)
-            return diff < 0.001
-
-        times = [1000, 5000, 29000]
-        for time in times:
-            self.assertTrue(check(time))
-
-        # Works up to 30s
-        self.assertFalse(check(60000))
 
     def test_new_timemachine(self):
         "Test timemark generation"
@@ -242,11 +213,6 @@ class WaveSyncTestCase(unittest.TestCase):
 
         # Won't work, will assume next interval
         self.assertFalse(check(relatives[0], relatives[0]+10, 3000))
-
-
-    #def test_pipelines(self):
-    #    "Test TX-RX pipeline"
-    #    packets = mock_tx()
 
     def test_pipelines(self):
         "Test TX-RX pipeline"

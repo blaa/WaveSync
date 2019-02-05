@@ -10,6 +10,8 @@ import zlib
 from datetime import datetime
 from time import time
 
+from libwavesync import time_machine
+
 class Packetizer:
     """Read chunks from queue, add timestamp marks and send over multicast."""
 
@@ -17,11 +19,9 @@ class Packetizer:
     HEADER_RAW_AUDIO = b'\x00\x00'
     HEADER_STATUS = b'\x40\x00'
 
-    def __init__(self, reader, time_machine,
-                 chunk_queue, audio_config, compress=False):
+    def __init__(self, reader, chunk_queue, audio_config, compress=False):
         self.reader = reader
         self.chunk_queue = chunk_queue
-        self.time_machine = time_machine
         self.compress = compress
         self.audio_config = audio_config
         self.stop = False
@@ -95,10 +95,12 @@ class Packetizer:
         while not self.stop:
             # Block until samples are read by the reader.
             chunk = await self.reader.get_next_chunk()
-            full_mark, mark = self.time_machine.get_timemark(self.audio_config.latency_ms)
+            now = time_machine.now()
+            mark = time_machine.get_timemark(now,
+                                             self.audio_config.latency_ms)
 
             if self.chunk_queue:
-                item = (full_mark, chunk)
+                item = (now + self.audio_config.latency_ms, chunk)
                 self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_AUDIO,
                                                     item))
                 self.chunk_queue.chunk_available.set()

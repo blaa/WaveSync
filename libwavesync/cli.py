@@ -16,7 +16,6 @@ import asyncio
 import socket
 
 from . import (
-    TimeMachine,
     AudioConfig,
     Packetizer,
     ChunkPlayer,
@@ -121,12 +120,11 @@ def main():
     if args.debug:
         loop.set_debug(True)
 
-    time_machine = TimeMachine()
 
     try:
         if args.tx is not None:
-            start_tx(args, loop, time_machine)
+            start_tx(args, loop)
         elif args.rx:
-            start_rx(args, loop, time_machine)
+            start_rx(args, loop)
     finally:
         loop.close()

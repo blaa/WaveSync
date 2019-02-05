@@ -15,8 +15,7 @@ def args_sender(snd):
                      action="store",
                      default=1000,
                      type=int,
-                     help=("time to synchronise the outputs (default 1000). "
-                           "Pass to the receivers if over 2000"))
+                     help="time to synchronise the outputs (default 1000).")
 
     snd.add_argument("--payload-size",
                      metavar="BYTES",

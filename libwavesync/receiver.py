@@ -5,6 +5,7 @@ import zlib
 from datetime import datetime
 
 from libwavesync import Packetizer, AudioConfig
+from libwavesync import time_machine
 
 class Receiver(asyncio.DatagramProtocol):
     """
@@ -15,11 +16,9 @@ class Receiver(asyncio.DatagramProtocol):
     - store in chunk list.
     """
 
-    def __init__(self, chunk_queue, time_machine, channel, sink_latency_ms):
+    def __init__(self, chunk_queue, channel, sink_latency_ms):
         # Store config
         self.channel = channel
-
-        self.time_machine = time_machine
 
         self.chunk_queue = chunk_queue
 
@@ -147,7 +146,8 @@ class Receiver(asyncio.DatagramProtocol):
             self.chunk_queue.ignore_audio_packets -= 1
             return
 
-        mark = self.time_machine.to_absolute_timestamp(mark)
+        mark = time_machine.to_absolute_timestamp(time_machine.now(),
+                                                  mark)
         item = (mark, chunk)
 
         # Count received audio-chunks
