@@ -27,7 +27,7 @@ from . import (
 from .cli_args import parse
 
 
-def start_tx(args, loop, time_machine):
+def start_tx(args, loop):
     "Initialize sender"
 
     # Transmitted configuration
@@ -35,27 +35,18 @@ def start_tx(args, loop, time_machine):
     audio_config = AudioConfig(rate=args.audio_rate,
                                sample=24 if args.audio_sample else 16,
                                channels=args.audio_channels,
-                               latency_s=args.latency_msec / 1000.0,
-                               sink_latency_s=args.sink_latency_msec / 1000.0)
-
-    audio_cfg = {
-        'rate': args.audio_rate,
-        'sample': 24 if args.audio_sample else 16,
-        'channels': args.audio_channels,
-        'latency_msec': args.latency_msec,
-    }
+                               latency_ms=args.latency_ms / 1000.0,
+                               sink_latency_ms=args.sink_latency_ms / 1000.0)
 
     # Sound sample reader
-    sample_reader = SampleReader()
-    sample_reader.set_chunk_size(args.payload_size, args.sample_size)
+    sample_reader = SampleReader(audio_config)
+    sample_reader.payload_size = args.payload_size
 
     if args.local_play:
         chunk_queue = ChunkQueue()
         player = ChunkPlayer(chunk_queue,
                              receiver=None,
-                             tolerance=args.tolerance_msec / 1000.0,
-                             sink_latency=args.sink_latency_msec / 1000.0,
-                             latency=args.latency_msec / 1000.0,
+                             tolerance=args.tolerance_ms / 1000.0,
                              buffer_size=args.buffer_size,
                              device_index=args.device_index)
         play = player.chunk_player()
@@ -64,10 +55,9 @@ def start_tx(args, loop, time_machine):
         chunk_queue = None
 
     # Packet splitter / sender
-    packetizer = Packetizer(sample_reader, time_machine,
+    packetizer = Packetizer(sample_reader, 
                             chunk_queue,
-                            args.latency_msec,
-                            audio_cfg=audio_cfg,
+                            audio_config,
                             compress=args.compress)
 
     packetizer.create_socket(args.ip_list,
@@ -83,15 +73,15 @@ def start_tx(args, loop, time_machine):
     loop.run_forever()
 
 
-def start_rx(args, loop, time_machine):
+def start_rx(args, loop):
     "Initialize receiver"
 
     # Network receiver with it's connection
     channel = args.ip_list[0]
     chunk_queue = ChunkQueue()
     receiver = Receiver(chunk_queue,
-                        time_machine,
-                        channel=channel)
+                        channel=channel,
+                        sink_latency_ms=args.sink_latency_ms)
 
     connection = loop.create_datagram_endpoint(lambda: receiver,
                                                family=socket.AF_INET,
@@ -99,9 +89,7 @@ def start_rx(args, loop, time_machine):
 
     # Coroutine pumping audio into PA
     player = ChunkPlayer(chunk_queue, receiver,
-                         tolerance=args.tolerance_msec / 1000.0,
-                         sink_latency=args.sink_latency_msec / 1000.0,
-                         latency=args.latency_msec / 1000.0,
+                         tolerance=args.tolerance_ms / 1000.0,
                          buffer_size=args.buffer_size,
                          device_index=args.device_index)
 

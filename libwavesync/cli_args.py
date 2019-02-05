@@ -10,7 +10,7 @@ def args_sender(snd):
                      help="play sound as well as transmitting it")
 
     snd.add_argument("--latency",
-                     dest="latency_msec",
+                     dest="latency_ms",
                      metavar="MSEC",
                      action="store",
                      default=1000,
@@ -72,7 +72,7 @@ def args_sender(snd):
 def args_receiver(rcv):
     "Define RX options"
     rcv.add_argument("--tolerance",
-                     dest='tolerance_msec',
+                     dest='tolerance_ms',
                      metavar="MSEC",
                      action="store",
                      type=int,
@@ -80,7 +80,7 @@ def args_receiver(rcv):
                      help="play error tolerance (default 15ms)")
 
     rcv.add_argument("--sink-latency",
-                     dest="sink_latency_msec",
+                     dest="sink_latency_ms",
                      metavar="MSEC",
                      action="store",
                      type=int,
@@ -157,12 +157,12 @@ def parse():
     if (args.tx is None) == (args.rx is False):
         parser.error('Exactly one action: --tx or --rx must be specified')
 
-    if args.sink_latency_msec > args.latency_msec:
+    if args.sink_latency_ms > args.latency_ms:
         parser.error("Sink latency cannot exceed system latency! Leave some margin too.")
 
-    if args.latency_msec >= 5000:
+    if args.latency_ms >= 5000:
         print("WARNING: You seem to be using large latency")
-    elif args.latency_msec >= 29000:
+    elif args.latency_ms >= 29000:
         parser.error("Latency shouldn't exceed 29s (in fact, it should work with latency < 5000).")
 
     if args.device_index < 0:
