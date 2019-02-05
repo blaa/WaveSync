@@ -1,5 +1,6 @@
 from .version import VERSION
 from .time_machine import TimeMachine
+from .audio_config import AudioConfig
 from .chunk_player import ChunkPlayer
 from .packetizer import Packetizer
 from .chunk_queue import ChunkQueue

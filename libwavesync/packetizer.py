@@ -18,13 +18,12 @@ class Packetizer:
     HEADER_STATUS = b'\x40\x00'
 
     def __init__(self, reader, time_machine,
-                 chunk_queue, latency_msec, audio_cfg, compress=False):
+                 chunk_queue, audio_config, compress=False):
         self.reader = reader
         self.chunk_queue = chunk_queue
         self.time_machine = time_machine
-        self.latency_msec = latency_msec
         self.compress = compress
-        self.audio_cfg = audio_cfg
+        self.audio_config = audio_config
         self.stop = False
 
         self.sock = None
@@ -65,11 +64,11 @@ class Packetizer:
         dgram = flags + struct.pack('dIHBBHH',
                                     now,
                                     chunk_no,
-                                    self.audio_cfg['rate'],
-                                    self.audio_cfg['sample'],
-                                    self.audio_cfg['channels'],
-                                    self.reader.get_chunk_size(),
-                                    self.audio_cfg['latency_msec'])
+                                    self.audio_config.rate,
+                                    self.audio_config.sample,
+                                    self.audio_config.channels,
+                                    self.audio_config.chunk_size,
+                                    self.audio_config.latency_ms)
         return dgram
 
     async def packetize(self):
@@ -90,15 +89,13 @@ class Packetizer:
 
         # For local playback
         if self.chunk_queue:
-            cfg = self.audio_cfg.copy()
-            cfg['chunk_size'] = 1500
             self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_CFG,
-                                                cfg))
+                                                self.audio_config))
 
         while not self.stop:
             # Block until samples are read by the reader.
             chunk = await self.reader.get_next_chunk()
-            full_mark, mark = self.time_machine.get_timemark(self.latency_msec)
+            full_mark, mark = self.time_machine.get_timemark(self.audio_config.latency_ms)
 
             if self.chunk_queue:
                 item = (full_mark, chunk)
@@ -135,7 +132,7 @@ class Packetizer:
                         s = "WARNING: UDP datagram size (%d) is too big for your network MTU"
                         s = s % len(dgram)
                         print(s)
-                        new_size = self.reader.decrement_chunk_size()
+                        new_size = self.reader.decrement_payload_size()
                         print("Trying MTU detection. New payload size is %d" % new_size)
                         break
 

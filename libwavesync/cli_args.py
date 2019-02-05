@@ -127,14 +127,6 @@ def args_common(opt):
                      help="multicast group or a unicast address, "
                           "may be given multiple times with --tx")
 
-    # TODO: This can be currently calculated from other options.
-    opt.add_argument("--sample-size",
-                     metavar="BYTES",
-                     action="store",
-                     type=int,
-                     default=4,
-                     help="sample size in bytes (16-bit 2-channel = 4 bytes)")
-
     opt.add_argument("--debug",
                      action="store_true",
                      help="enable debugging code")

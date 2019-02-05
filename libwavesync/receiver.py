@@ -4,7 +4,7 @@ import struct
 import zlib
 from datetime import datetime
 
-from . import Packetizer
+from libwavesync import Packetizer, AudioConfig
 
 class Receiver(asyncio.DatagramProtocol):
     """
@@ -15,7 +15,7 @@ class Receiver(asyncio.DatagramProtocol):
     - store in chunk list.
     """
 
-    def __init__(self, chunk_queue, time_machine, channel):
+    def __init__(self, chunk_queue, time_machine, channel, sink_latency_ms):
         # Store config
         self.channel = channel
 
@@ -27,7 +27,8 @@ class Receiver(asyncio.DatagramProtocol):
         self.stat_network_drops = 0
 
         # Audio configuration sent by transmitter
-        self.current_audio_cfg = None
+        self.audio_config = None
+        self.sink_latency_ms = sink_latency_ms
 
         super().__init__()
 
@@ -78,8 +79,8 @@ class Receiver(asyncio.DatagramProtocol):
          rate, sample,
          channels,
          chunk_size,
-         latency) = struct.unpack('dIHBBHH',
-                                  data[2:2 + 8+4+2+1+1+2+2])
+         latency_ms) = struct.unpack('dIHBBHH',
+                                     data[2:2 + 8+4+2+1+1+2+2])
 
         q = self.chunk_queue
 
@@ -87,17 +88,15 @@ class Receiver(asyncio.DatagramProtocol):
         self.stat_network_latency = (now - sender_timestamp)
 
         # Handle audio configuration
-        audio_cfg = {
-            'rate': rate,
-            'sample': sample,
-            'channels': channels,
-            'chunk_size': chunk_size,
-            'latency_msec': latency,
-        }
-        if audio_cfg != self.current_audio_cfg:
+        audio_config = AudioConfig(rate, sample, channels,
+                                   latency_ms,
+                                   sink_latency_ms=self.sink_latency_ms)
+        audio_config.chunk_size = chunk_size
+
+        if audio_config != self.audio_config:
             # If changed - sent further
-            q.chunk_list.append((q.CMD_CFG, audio_cfg))
-            self.current_audio_cfg = audio_cfg
+            q.chunk_list.append((q.CMD_CFG, audio_config))
+            self.audio_config = audio_config
 
         # Handle dropped packets
 

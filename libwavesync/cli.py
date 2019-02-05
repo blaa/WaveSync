@@ -17,6 +17,7 @@ import socket
 
 from . import (
     TimeMachine,
+    AudioConfig,
     Packetizer,
     ChunkPlayer,
     ChunkQueue,
@@ -31,6 +32,13 @@ def start_tx(args, loop, time_machine):
     "Initialize sender"
 
     # Transmitted configuration
+
+    audio_config = AudioConfig(rate=args.audio_rate,
+                               sample=24 if args.audio_sample else 16,
+                               channels=args.audio_channels,
+                               latency_s=args.latency_msec / 1000.0,
+                               sink_latency_s=args.sink_latency_msec / 1000.0)
+
     audio_cfg = {
         'rate': args.audio_rate,
         'sample': 24 if args.audio_sample else 16,

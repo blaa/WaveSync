@@ -5,6 +5,7 @@ from datetime import datetime
 from unittest.mock import Mock, MagicMock
 
 from . import (
+    AudioConfig,
     Packetizer,
     ChunkPlayer,
     ChunkQueue,
@@ -19,11 +20,13 @@ from . import time_machine as tm
 async def mock_audio_generator(reader, packetizer, tx_player, rx_player):
     "Mock a unix socket, generate some 'audio' data."
     reader.connection_made(None)
-    sample = b'\x01' * 6000
+    sample = b'\x01\x02'
+    frame = 2 * sample
+    pre_chunk = frame * 300
 
     # Generate "audio"
     for _ in range(0, 2000):
-        reader.data_received(sample)
+        reader.data_received(pre_chunk)
         await asyncio.sleep(0)
 
     # Emulate audio underflow
@@ -32,21 +35,25 @@ async def mock_audio_generator(reader, packetizer, tx_player, rx_player):
     # Stop correctly pipeline
     print("mock_sample_finishing")
 
-    packetizer.stop = True
+    print("Closing RX Player")
     rx_player.stop = True
+    for _ in range(0, 200):
+        reader.data_received(pre_chunk)
+        await asyncio.sleep(0)
+
+    print("Closing TX Player and Packetizer")
     tx_player.stop = True
-    reader.data_received(sample)
-    await asyncio.sleep(0)
+    packetizer.stop = True
+    for _ in range(0, 10):
+        reader.data_received(pre_chunk)
+        await asyncio.sleep(0)
 
-
-def mock_chunk_player(latency_msec):
+def mock_chunk_player():
     "Mock chunk player"
     chunk_queue = ChunkQueue()
     player = ChunkPlayer(chunk_queue,
                          receiver=None,
                          tolerance=30 / 1000.0,
-                         sink_latency=0,
-                         latency=latency_msec / 1000.0,
                          buffer_size=8192,
                          # Mock output device
                          device_index=-1)
@@ -66,12 +73,11 @@ def mock_chunk_player(latency_msec):
     return chunk_queue, player
 
 
-def mock_packetizer(audio_cfg, sample_reader, time_machine, chunk_queue):
+def mock_packetizer(audio_config, sample_reader, time_machine, chunk_queue):
     # Packet splitter / sender
     packetizer = Packetizer(sample_reader, time_machine,
                             chunk_queue,
-                            audio_cfg['latency_msec'],
-                            audio_cfg=audio_cfg,
+                            audio_config,
                             compress=False)
 
     # Mock UDP socket
@@ -79,61 +85,6 @@ def mock_packetizer(audio_cfg, sample_reader, time_machine, chunk_queue):
     packetizer.sock.sendto = Mock()
     packetizer.destinations = [("Mocked IP", 1234)]
     return packetizer
-
-
-def mock_tx():
-    """
-    Mocked TX pipeline
-    """
-    # Transmitted configuration
-    audio_cfg = {
-        'rate': 44100,
-        'sample': 24,
-        'channels': 2,
-        'latency_msec': 1000,
-    }
-
-    tm = time_machine.TimeMachine()
-
-    # Sound sample reader
-    sample_reader = SampleReader()
-    sample_reader.set_chunk_size(payload_size=1000, sample_size=4)
-
-    chunk_queue, player = mock_chunk_player(audio_cfg['latency_msec'])
-
-    # Packet splitter / sender
-    packetizer = Packetizer(sample_reader, time_machine,
-                            chunk_queue,
-                            audio_cfg['latency_msec'],
-                            audio_cfg=audio_cfg,
-                            compress=False)
-
-    # Mock UDP socket
-    packetizer.sock = Mock()
-    packetizer.sock.sendto = Mock()
-    packetizer.destinations = [("Mocked IP", 1234)]
-
-    # Mock audio input
-    task_reader = mock_audio_generator(sample_reader,
-                                       packetizer,
-                                       player, player)
-
-    # Start loop
-    task_player = player.chunk_player()
-    task_packetize = packetizer.packetize()
-
-    loop = asyncio.get_event_loop()
-    tasks = asyncio.gather(task_reader, task_packetize, task_player)
-    loop.run_until_complete(tasks)
-
-    player.stream.write.assert_called()
-    packetizer.sock.sendto.assert_called()
-
-    packets = [
-        mc[1][0]
-        for mc in packetizer.sock.sendto.mock_calls
-    ]
-    return packets
 
 
 async def mock_packets(packets, receiver, player):
@@ -154,57 +105,43 @@ async def mock_packets(packets, receiver, player):
     await asyncio.sleep(0)
 
 
-def mock_rx(packets):
-    "Mocked RX pipeline"
-    time_machine = tm.TimeMachine()
-
-    # Network receiver with it's connection
-    channel = ('0.0.0.0', 1234)
-    chunk_queue, player = mock_chunk_player(1000)
-
-    receiver = Receiver(chunk_queue,
-                        time_machine,
-                        channel=channel)
-
-    task_packets = mock_packets(packets, receiver, player)
-    task_player = player.chunk_player()
-
-    tasks = asyncio.gather(task_packets, task_player)
-
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(tasks)
-
-
 def mock_txrx():
     """
     Mocked TX-RX pipeline
     """
-    # Transmitted configuration
-    audio_cfg = {
-        'rate': 44100,
-        'sample': 24,
-        'channels': 2,
-        'latency_msec': 1000,
-    }
+
+   # Transmitted configuration
+    audio_config = AudioConfig(rate=44100,
+                               sample=16,
+                               channels=2,
+                               latency_ms=1000,
+                               sink_latency_ms=0)
+
+    # # Transmitted configuration
+    # audio_cfg = {
+    #     'rate': 44100,
+    #     'sample': 24,
+    #     'channels': 2,
+    #     'latency_msec': 1000,
+    # }
 
     time_machine = tm.TimeMachine()
-
 
     ##
     # Players
     ##
-    rx_chunk_queue, rx_player = mock_chunk_player(audio_cfg['latency_msec'])
-    tx_chunk_queue, tx_player = mock_chunk_player(audio_cfg['latency_msec'])
+    rx_chunk_queue, rx_player = mock_chunk_player()
+    tx_chunk_queue, tx_player = mock_chunk_player()
 
     ##
     # TX
     ##
 
     # Sound sample reader
-    sample_reader = SampleReader()
-    sample_reader.set_chunk_size(payload_size=1000, sample_size=4, rate=44100)
+    sample_reader = SampleReader(audio_config)
+    sample_reader.payload_size = 1000
 
-    tx_packetizer = mock_packetizer(audio_cfg, sample_reader,
+    tx_packetizer = mock_packetizer(audio_config, sample_reader,
                                     time_machine, tx_chunk_queue)
 
     # Mock audio input
@@ -221,7 +158,8 @@ def mock_txrx():
 
     rx_receiver = Receiver(rx_chunk_queue,
                            time_machine,
-                           channel=channel)
+                           channel=channel,
+                           sink_latency_ms=0)
 
     # Combine TX-RX
     rx_receiver.connection_made(MagicMock())

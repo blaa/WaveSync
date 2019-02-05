@@ -41,6 +41,9 @@ def to_absolute_timestamp(relative_ts, mark):
         recovered += RANGE
     return recovered
 
+def now():
+    "Current UTC timestamp"
+    return datetime.utcnow().timestamp()
 
 class TimeMachine:
     """

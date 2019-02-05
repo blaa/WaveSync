@@ -1,5 +1,5 @@
 import asyncio
-
+from libwavesync import time_machine
 
 class SampleReader(asyncio.Protocol):
     """Read samples over the network, chunk them and put into a queue"""
@@ -8,17 +8,16 @@ class SampleReader(asyncio.Protocol):
     SILENCE_TRESHOLD = 20
     HEADER_SIZE = 4
 
-    def __init__(self):
+    def __init__(self, audio_config):
         super().__init__()
         self.sample_queue = asyncio.Queue()
+
+        self.audio_config = audio_config
 
         self.silence_detect = 0
 
         # Initialized along the chunk_size
-        self.chunk_size = None
-        self.sample_size = None
-        self.rate = None
-        self.chunk_time = None
+        self._payload_size = None
 
         # Buffering before chunking
         self.buffer = None
@@ -26,22 +25,13 @@ class SampleReader(asyncio.Protocol):
         # Tracking stream time.
         self.stream_time = None
 
-    def _configure(self, chunk_size):
-        "Configure fields, given a new chunk_size"
-        self.chunk_size = chunk_size
-        # To fit always the same amount of both channels (to not swap them in case
-        # of a packet drop) ensure the amount of space is divisible by sample_size
-        self.chunk_size -= self.chunk_size % self.sample_size
-        samples_in_chunk = self.chunk_size / self.sample_size
-        self.chunk_time = samples_in_chunk / self.rate
+    @property
+    def payload_size(self):
+        return self._payload_size
 
-    def set_chunk_size(self, payload_size, sample_size, rate):
+    @payload_size.setter
+    def payload_size(self, payload_size):
         "Calculate optimal chunk size"
-
-        # Required for MTU detection and time tracking
-        self.sample_size = sample_size
-        self.rate = rate
-
         # 1420 is max payload for UDP over 1500 MTU ethernet
         # 80 - max IP header (60) + UDP header.
         # 4 - our header / timestamp
@@ -49,7 +39,9 @@ class SampleReader(asyncio.Protocol):
         #       small as 20 bytes.
 
         # Remove our header from the max payload size
-        self._configure(payload_size - self.HEADER_SIZE)
+        self._payload_size = payload_size
+        max_chunk_size = payload_size - self.HEADER_SIZE
+        self.audio_config.chunk_size = max_chunk_size
 
     def connection_made(self, transport):
         "Initialize stream buffer"
@@ -58,13 +50,13 @@ class SampleReader(asyncio.Protocol):
     def data_received(self, data):
         "Read fifo indefinitely and push data into queue"
 
-        # NOTE: Buffer needs to be only twice the size of the data
+        # TODO: Buffer needs to be only twice the size of the data
         # and could be handled without allocations/deallocations.
         self.buffer += data
 
-        while len(self.buffer) >= self.chunk_size:
-            chunk = self.buffer[:self.chunk_size]
-            self.buffer = self.buffer[self.chunk_size:]
+        while len(self.buffer) >= self.audio_config.chunk_size:
+            chunk = self.buffer[:self.audio_config.chunk_size]
+            self.buffer = self.buffer[self.audio_config.chunk_size:]
 
             # Detect the end of current silence
             if self.silence_detect is True:
@@ -91,6 +83,9 @@ class SampleReader(asyncio.Protocol):
                         self.stream_time = None
                         continue
 
+            if self.stream_time is None:
+                self.stream_time = time_machine.now()
+            
             self.sample_queue.put_nowait(chunk)
 
         # Warning - might happen on slow UDP output sink
@@ -104,19 +99,16 @@ class SampleReader(asyncio.Protocol):
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(loop.stop)
 
-    def decrement_chunk_size(self):
+    def decrement_payload_size(self):
         "Decrement chunk size and flush chunks currently in queue"
-        self._configure(self.chunk_size - 1)
+        self.payload_size -= 1
         # Empty the queue
         while True:
             try:
                 self.sample_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        return self.chunk_size + self.HEADER_SIZE
-
-    def get_chunk_size(self):
-        return self.chunk_size
+        return self.audio_config.chunk_size + self.HEADER_SIZE
 
     def get_next_chunk(self):
         return self.sample_queue.get()

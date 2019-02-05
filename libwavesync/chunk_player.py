@@ -3,11 +3,11 @@ import random
 from time import time
 from datetime import datetime
 
+
 class ChunkPlayer:
     "Play received audio and keep sync"
 
     def __init__(self, chunk_queue, receiver, tolerance,
-                 sink_latency, latency,
                  buffer_size, device_index):
         # Our data source
         self.chunk_queue = chunk_queue
@@ -17,12 +17,9 @@ class ChunkPlayer:
 
         # Configuration
         self.tolerance = tolerance
-        self.sink_latency = sink_latency
-        # Only needed if latency in system exceeds 2s
-        self.latency = latency
 
         # Audio state
-        self.audio_cfg = None
+        self.audio_config = None
         self.buffer_size = buffer_size
         self.device_index = device_index
         self.stream = None
@@ -70,7 +67,7 @@ class ChunkPlayer:
         if self.silence_cache is not None:
             return self.silence_cache
 
-        silent_chunk = b'\x00' * self.audio_cfg['chunk_size']
+        silent_chunk = b'\x00' * self.audio_config.chunk_size
         self.silence_cache = silent_chunk
         return silent_chunk
 
@@ -80,13 +77,7 @@ class ChunkPlayer:
         self.clear_state()
 
         # Open stream
-        cfg = self.audio_cfg
-        if cfg['sample'] == 24:
-            frame_size = 3 * cfg['channels']
-            audio_format = pyaudio.paInt24
-        else:
-            frame_size = 2 * cfg['channels']
-            audio_format = pyaudio.paInt16
+        cfg = self.audio_config
 
         frames_per_buffer = self.buffer_size
 
@@ -96,16 +87,20 @@ class ChunkPlayer:
         else:
             assert self.stream is None
             self.pyaudio = pyaudio.PyAudio()
+            audio_format = (
+                pyaudio.paInt24
+                if cfg.sample == 24
+                else pyaudio.paInt16
+            )
             stream = self.pyaudio.open(output=True,
-                                       channels=cfg['channels'],
-                                       rate=cfg['rate'],
+                                       channels=cfg.channels,
+                                       rate=cfg.rate,
                                        format=audio_format,
                                        frames_per_buffer=frames_per_buffer,
                                        output_device_index=self.device_index)
             self.stream = stream
 
-        self.frame_size = frame_size
-        self.chunk_frames = self.audio_cfg['chunk_size'] / frame_size
+        self.chunk_frames = self.audio_config.chunk_size / cfg.frame_size
 
     def _close_stream(self):
         self.stream.stop_stream()
@@ -131,7 +126,7 @@ class ChunkPlayer:
         while not self.stop:
             if not self.chunk_queue.chunk_list:
 
-                if self.audio_cfg is not None:
+                if self.audio_config is not None:
                     print("Queue empty - waiting")
 
                 self.chunk_queue.chunk_available.clear()
@@ -139,8 +134,8 @@ class ChunkPlayer:
 
                 recent_start = time()
                 recent = 0
-                if self.audio_cfg is not None:
-                    await asyncio.sleep(self.audio_cfg['latency_msec'] / 1000 / 4)
+                if self.audio_config is not None:
+                    await asyncio.sleep(self.audio_config.latency_ms / 1000 / 4)
                     print("Got stream flowing. q_len=%d" % len(self.chunk_queue.chunk_list))
                 continue
 
@@ -149,12 +144,13 @@ class ChunkPlayer:
             if cmd == self.chunk_queue.CMD_CFG:
                 print("Got new configuration - opening audio stream")
                 self.clear_state()
-                self.audio_cfg = item
+                self.audio_config = item
                 if self.stream:
                     self._close_stream()
                 self._open_stream()
                 # Calculate maximum sensible delay in given configuration
-                max_delay = (0.2 + self.sink_latency + self.audio_cfg['latency_msec'] / 1000)
+                max_delay = (200 + self.audio_config.sink_latency_ms +
+                             self.audio_config.latency_ms) / 1000
                 print("Assuming maximum chunk delay of %.2fms in this setup" % (max_delay * 1000))
                 continue
             elif cmd == self.chunk_queue.CMD_DROPS:
@@ -173,7 +169,7 @@ class ChunkPlayer:
                 continue
 
             mark, chunk = item
-            desired_time = mark - self.sink_latency
+            desired_time = mark - self.audio_config.sink_latency_ms
 
             # 0) We got the next chunk to be played
             now = datetime.utcnow().timestamp()
@@ -232,7 +228,7 @@ class ChunkPlayer:
 
             # Main status line
             if recent > 200:
-                frames_in_chunk = len(chunk) / self.frame_size
+                frames_in_chunk = len(chunk) / self.audio_config.frame_size
 
                 took = time() - recent_start
                 chunks_per_s = recent / took
@@ -271,3 +267,5 @@ class ChunkPlayer:
                     elif self.receiver.stat_network_latency < 0:
                         print("WARNING: You either exceeded the speed of "
                               "light or have unsynchronised clocks")
+
+        print("Finishing chunk player")

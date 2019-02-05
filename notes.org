@@ -20,6 +20,8 @@ Random project Notes
 ** TODO Replace datetimes with UTC timestamps
    Handling correct datetimes seems costly and overly complicated.
 
+** TODO [#C] Migrate most warnings to logging module.
+
 ** REVERTED Idea: Insert silence every n-th chunk to make it less noticable
    CLOSED: [2017-02-26 Sun 18:55]
    Still Idea: Or duplicate original chunks with certain properties
