@@ -31,12 +31,11 @@ def start_tx(args, loop):
     "Initialize sender"
 
     # Transmitted configuration
-
     audio_config = AudioConfig(rate=args.audio_rate,
                                sample=24 if args.audio_sample else 16,
                                channels=args.audio_channels,
-                               latency_ms=args.latency_ms / 1000.0,
-                               sink_latency_ms=args.sink_latency_ms / 1000.0)
+                               latency_ms=args.latency_ms,
+                               sink_latency_ms=args.sink_latency_ms)
 
     # Sound sample reader
     sample_reader = SampleReader(audio_config)
@@ -46,7 +45,7 @@ def start_tx(args, loop):
         chunk_queue = ChunkQueue()
         player = ChunkPlayer(chunk_queue,
                              receiver=None,
-                             tolerance=args.tolerance_ms / 1000.0,
+                             tolerance_ms=args.tolerance_ms,
                              buffer_size=args.buffer_size,
                              device_index=args.device_index)
         play = player.chunk_player()
@@ -55,7 +54,7 @@ def start_tx(args, loop):
         chunk_queue = None
 
     # Packet splitter / sender
-    packetizer = Packetizer(sample_reader, 
+    packetizer = Packetizer(sample_reader,
                             chunk_queue,
                             audio_config,
                             compress=args.compress)
@@ -89,7 +88,7 @@ def start_rx(args, loop):
 
     # Coroutine pumping audio into PA
     player = ChunkPlayer(chunk_queue, receiver,
-                         tolerance=args.tolerance_ms / 1000.0,
+                         tolerance_ms=args.tolerance_ms,
                          buffer_size=args.buffer_size,
                          device_index=args.device_index)
 

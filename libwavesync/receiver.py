@@ -2,7 +2,6 @@ import asyncio
 import socket
 import struct
 import zlib
-from datetime import datetime
 
 from libwavesync import Packetizer, AudioConfig
 from libwavesync import time_machine
@@ -50,7 +49,7 @@ class Receiver(asyncio.DatagramProtocol):
         else:
             try:
                 octet_0 = int(octets[0])
-                if not 224 >= octet_0 <= 239:
+                if not 224 <= octet_0 <= 239:
                     multicast = False
             except ValueError:
                 multicast = False
@@ -68,7 +67,6 @@ class Receiver(asyncio.DatagramProtocol):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
     def _handle_status(self, data):
-        now = datetime.utcnow().timestamp()
 
         if len(data) < (2 + 20):
             print("WARNING: Status header too short")
@@ -84,6 +82,7 @@ class Receiver(asyncio.DatagramProtocol):
         q = self.chunk_queue
 
         # Handle timestamp
+        now = time_machine.now()
         self.stat_network_latency = (now - sender_timestamp)
 
         # Handle audio configuration

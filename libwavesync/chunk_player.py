@@ -7,7 +7,7 @@ from libwavesync import time_machine
 class ChunkPlayer:
     "Play received audio and keep sync"
 
-    def __init__(self, chunk_queue, receiver, tolerance,
+    def __init__(self, chunk_queue, receiver, tolerance_ms,
                  buffer_size, device_index):
         # Our data source
         self.chunk_queue = chunk_queue
@@ -16,7 +16,7 @@ class ChunkPlayer:
         self.receiver = receiver
 
         # Configuration
-        self.tolerance = tolerance
+        self.tolerance_ms = tolerance_ms
 
         # Audio state
         self.audio_config = None
@@ -118,7 +118,7 @@ class ChunkPlayer:
         recent_start = time()
         recent = 0
 
-        mid_tolerance = self.tolerance / 2
+        mid_tolerance_s = self.tolerance_ms / 2 / 1000
         one_ms = 1/1000.0
 
         max_delay = 5
@@ -185,13 +185,13 @@ class ChunkPlayer:
             # Probabilistic drop of lagging chunks to get back on track.
             # Probability of drop is higher, the more chunk lags behind current
             # time. Similar to the RED algorithm in TCP congestion.
-            if delay < -mid_tolerance:
-                over = -delay - mid_tolerance
-                prob = over / mid_tolerance
+            if delay < -mid_tolerance_s:
+                over = -delay - mid_tolerance_s
+                prob = over / mid_tolerance_s
                 if random.random() < prob:
-                    s = "Drop chunk: q_len=%2d delay=%.3fms < 0. tolerance=%.3fms: P=%.2f"
+                    s = "Drop chunk: q_len=%2d delay=%.1fms < 0. tolerance=%.1fms: P=%.2f"
                     s = s % (len(self.chunk_queue.chunk_list),
-                             delay*1000, -self.tolerance*1000, prob)
+                             delay, self.tolerance_ms, prob)
                     print(s)
                     self.stat_time_drops += 1
                     continue
@@ -263,10 +263,10 @@ class ChunkPlayer:
 
                 # Warnings
                 if self.receiver is not None:
-                    if self.receiver.stat_network_latency > 4:
+                    if self.receiver.stat_network_latency > 1:
                         print("WARNING: Your network latency seems HUGE. "
                               "Are the clocks synchronised?")
-                    elif self.receiver.stat_network_latency < 0:
+                    elif self.receiver.stat_network_latency <= -0.05:
                         print("WARNING: You either exceeded the speed of "
                               "light or have unsynchronised clocks")
 

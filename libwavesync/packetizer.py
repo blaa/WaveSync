@@ -100,10 +100,10 @@ class Packetizer:
             now = time_machine.now()
             diff = stream_time - now
 
-            if diff > 0.1:
+            if diff > 0.5:
                 print("Waiting to synchronize input stream. Stream-real, difference is",
                       diff)
-                await asyncio.sleep(0.09)
+                await asyncio.sleep(0.4)
             elif diff < -5:
                 print("Input stream is lagging", diff)
 

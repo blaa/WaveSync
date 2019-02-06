@@ -1,3 +1,4 @@
+import os
 import argparse
 from . import VERSION
 
@@ -156,6 +157,11 @@ def parse():
 
     if (args.tx is None) == (args.rx is False):
         parser.error('Exactly one action: --tx or --rx must be specified')
+
+    if args.tx is not None:
+        if not os.path.exists(args.tx):
+            parser.error("--tx argument must point to a valid UNIX socket")
+
 
     if args.sink_latency_ms > args.latency_ms:
         parser.error("Sink latency cannot exceed system latency! Leave some margin too.")

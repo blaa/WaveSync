@@ -96,10 +96,11 @@ class SampleReader(asyncio.Protocol):
             s = s % self.sample_queue.qsize()
             print(s)
 
-        diff = self.stream_time - time_machine.now()
-        if diff < min(-self.audio_config.latency_ms/2, -1): 
-            print("WARNING: Input underflow.")
-            self.stream_time = None
+        if self.stream_time is not None:
+            diff = self.stream_time - time_machine.now()
+            if diff < min(-self.audio_config.latency_ms/2, -1):
+                print("WARNING: Input underflow.")
+                self.stream_time = None
 
     def connection_lost(self, exc):
         print("The pulse was lost. I should go.")

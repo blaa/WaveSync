@@ -60,7 +60,7 @@ def mock_chunk_player():
     chunk_queue = ChunkQueue()
     player = ChunkPlayer(chunk_queue,
                          receiver=None,
-                         tolerance=30 / 1000.0,
+                         tolerance_ms=30,
                          buffer_size=8192,
                          # Mock output device
                          device_index=-1)
