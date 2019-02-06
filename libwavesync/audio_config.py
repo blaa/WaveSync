@@ -20,9 +20,11 @@ class AudioConfig:
 
         # System latency (distributed buffer size)
         self.latency_ms = latency_ms
+        self.latency_s = latency_ms / 1000.0
 
         # Audio output latency
         self.sink_latency_ms = sink_latency_ms
+        self.sink_latency_s = sink_latency_ms / 1000.0
 
         assert channels in [1, 2]
         assert sample in [24, 16]

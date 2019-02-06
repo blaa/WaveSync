@@ -1,7 +1,7 @@
 import asyncio
 import random
 from time import time
-from datetime import datetime
+from libwavesync import time_machine
 
 
 class ChunkPlayer:
@@ -119,7 +119,7 @@ class ChunkPlayer:
         recent = 0
 
         mid_tolerance = self.tolerance / 2
-        one_msec = 1/1000.0
+        one_ms = 1/1000.0
 
         max_delay = 5
 
@@ -172,7 +172,9 @@ class ChunkPlayer:
             desired_time = mark - self.audio_config.sink_latency_ms
 
             # 0) We got the next chunk to be played
-            now = datetime.utcnow().timestamp()
+            now = time_machine.now()
+
+            # Negative when we're lagging behind.
             delay = desired_time - now
 
             self.stat_total_delay += delay
@@ -194,17 +196,17 @@ class ChunkPlayer:
                     self.stat_time_drops += 1
                     continue
 
-            elif delay > max_delay:
-                # Probably we hanged for so long time that the time recovering
-                # mechanism rolled over. Recover
-                print("Huge recovery - delay of %.2f exceeds the max delay of %.2f" % (
-                    delay, max_delay))
-                self.clear_state()
-                continue
+            # elif delay > max_delay:
+            #     # Probably we hanged for so long time that the time recovering
+            #     # mechanism rolled over. Recover
+            #     print("Huge recovery - delay of %.2f exceeds the max delay of %.2f" % (
+            #         delay, max_delay))
+            #     self.clear_state()
+            #     continue
 
             # If chunk is in the future - wait until it's within the tolerance
-            elif delay > one_msec:
-                to_wait = max(one_msec, delay - one_msec)
+            elif delay > one_ms:
+                to_wait = max(one_ms, delay - one_ms)
                 await asyncio.sleep(to_wait)
 
 
@@ -216,7 +218,7 @@ class ChunkPlayer:
                 buffer_space = self.stream.get_write_available()
                 if buffer_space < self.chunk_frames:
                     self.stat_output_delays += 1
-                    await asyncio.sleep(max(one_msec, delay))
+                    await asyncio.sleep(max(one_ms, delay))
                     times += 1
                     if times > 100:
                         print("Hey, the output is STUCK!")
@@ -268,4 +270,4 @@ class ChunkPlayer:
                         print("WARNING: You either exceeded the speed of "
                               "light or have unsynchronised clocks")
 
-        print("Finishing chunk player")
+        print("- Finishing chunk player")

@@ -14,39 +14,46 @@ from . import (
     cli_args,
 )
 
-from . import time_machine as tm
+from . import time_machine
 
 
 async def mock_audio_generator(reader, packetizer, tx_player, rx_player):
     "Mock a unix socket, generate some 'audio' data."
     reader.connection_made(None)
-    sample = b'\x01\x02'
-    frame = 2 * sample
+    frame = b'\x01\x02\x11\x12'
     pre_chunk = frame * 300
+    pre_chunk_time = 300 / 44100
 
-    # Generate "audio"
-    for _ in range(0, 2000):
-        reader.data_received(pre_chunk)
-        await asyncio.sleep(0)
+    async def generate(seconds):
+        print("Generating audio for", seconds, "seconds")
 
-    # Emulate audio underflow
-    await asyncio.sleep(4)
+        # Generate "audio", synchronize with the real-world clock.
+        now = time_machine.now()
+        chunk_time = now
+        until = now + seconds
+
+        while now < until:
+            reader.data_received(pre_chunk)
+            chunk_time += pre_chunk_time
+            now = time_machine.now()
+            diff = chunk_time - now
+            if diff > 0.1:
+                await asyncio.sleep(diff)
+        print("Generation done")
+
+    # Generate audio for 3 seconds
+    await generate(3)
 
     # Stop correctly pipeline
-    print("mock_sample_finishing")
-
-    print("Closing RX Player")
+    print("Closing RX/TX Player")
     rx_player.stop = True
-    for _ in range(0, 200):
-        reader.data_received(pre_chunk)
-        await asyncio.sleep(0)
-
-    print("Closing TX Player and Packetizer")
     tx_player.stop = True
+    await generate(0.1)
+
+    print("Closing Packetizer")
     packetizer.stop = True
-    for _ in range(0, 10):
-        reader.data_received(pre_chunk)
-        await asyncio.sleep(0)
+    await generate(0.1)
+
 
 def mock_chunk_player():
     "Mock chunk player"
@@ -114,7 +121,7 @@ def mock_txrx():
     audio_config = AudioConfig(rate=44100,
                                sample=16,
                                channels=2,
-                               latency_ms=1000,
+                               latency_ms=200,
                                sink_latency_ms=0)
 
     ##
@@ -166,15 +173,18 @@ def mock_txrx():
                            task_tx_packetize,
                            task_tx_player,
                            task_rx_player)
+    #loop.set_debug(True)
+    #loop.slow_callback_duration = 0.001
+
     loop.run_until_complete(tasks)
 
     # Both played
     tx_player.stream.write.assert_called()
     rx_player.stream.write.assert_called()
 
-    # TODO recheck after fixing time stream
-    assert rx_player.stream.write.call_count >= 1
-    assert tx_player.stream.write.call_count > 1000
+    assert rx_player.stream.write.call_count > 50
+    assert tx_player.stream.write.call_count > 50
+
 
 class WaveSyncTestCase(unittest.TestCase):
 
@@ -187,8 +197,8 @@ class WaveSyncTestCase(unittest.TestCase):
             relative1 - time during tm creation
             relative2 - time during ts extraction
             """
-            mark = tm.get_timemark(relative1, latency_ms)
-            ts_recovered = tm.to_absolute_timestamp(relative2, mark)
+            ts_future, mark = time_machine.get_timemark(relative1, latency_ms/1000)
+            ts_recovered = time_machine.to_absolute_timestamp(relative2, mark)
             diff = abs(relative1 + latency_ms/1000 - ts_recovered)
             return diff < 0.001
 
@@ -205,7 +215,6 @@ class WaveSyncTestCase(unittest.TestCase):
         times = [2000, 5000, 25000]
         for relative in relatives:
             for time in times:
-                print("rel", relative, "time", time)
                 self.assertTrue(check(relative, relative-3, time))
                 self.assertTrue(check(relative, relative+0.2, time))
                 self.assertTrue(check(relative, relative+0.9, time))

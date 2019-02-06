@@ -11,7 +11,7 @@ import struct
 RANGE = 60
 
 
-def get_timemark(relative_ts, latency_ms):
+def get_timemark(relative_ts, latency_s):
     """
     Create a 1-ms resolution timemark equal to relative_ts + latency_ms.
 
@@ -23,10 +23,10 @@ def get_timemark(relative_ts, latency_ms):
     """
     #base = int(relative // RANGE * RANGE)
     #mark = int((relative - (relative  // RANGE) * RANGE ) * 1000)
-    ts = relative_ts + latency_ms / 1000
-    stamp = int((ts % RANGE * 1000))
+    future_ts = relative_ts + latency_s
+    stamp = int((future_ts % RANGE * 1000))
     mark = struct.pack('>H', stamp)
-    return mark
+    return future_ts, mark
 
 
 def to_absolute_timestamp(relative_ts, mark):

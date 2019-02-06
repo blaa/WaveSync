@@ -52,6 +52,7 @@ class SampleReader(asyncio.Protocol):
 
         # TODO: Buffer needs to be only twice the size of the data
         # and could be handled without allocations/deallocations.
+        # TODO: Use bytearray()
         self.buffer += data
 
         while len(self.buffer) >= self.audio_config.chunk_size:
@@ -85,14 +86,20 @@ class SampleReader(asyncio.Protocol):
 
             if self.stream_time is None:
                 self.stream_time = time_machine.now()
-            
-            self.sample_queue.put_nowait(chunk)
+            else:
+                self.stream_time += self.audio_config.chunk_time
+            self.sample_queue.put_nowait((self.stream_time, chunk))
 
         # Warning - might happen on slow UDP output sink
-        if self.sample_queue.qsize() > 30:
-            s = "WARNING: Samples in queue: %d - slow UDP transmission!"
+        if self.sample_queue.qsize() > 600:
+            s = "WARNING: Samples in queue: %d - slow UDP transmission or eager input."
             s = s % self.sample_queue.qsize()
             print(s)
+
+        diff = self.stream_time - time_machine.now()
+        if diff < min(-self.audio_config.latency_ms/2, -1): 
+            print("WARNING: Input underflow.")
+            self.stream_time = None
 
     def connection_lost(self, exc):
         print("The pulse was lost. I should go.")

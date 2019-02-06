@@ -88,19 +88,31 @@ class Packetizer:
         recent_start = time()
 
         # For local playback
-        if self.chunk_queue:
+        if self.chunk_queue is not None:
             self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_CFG,
                                                 self.audio_config))
 
         while not self.stop:
             # Block until samples are read by the reader.
-            chunk = await self.reader.get_next_chunk()
-            now = time_machine.now()
-            mark = time_machine.get_timemark(now,
-                                             self.audio_config.latency_ms)
+            stream_time, chunk = await self.reader.get_next_chunk()
 
-            if self.chunk_queue:
-                item = (now + self.audio_config.latency_ms, chunk)
+            # Handle input flood, to keep us within timemarking range.
+            now = time_machine.now()
+            diff = stream_time - now
+
+            if diff > 0.1:
+                print("Waiting to synchronize input stream. Stream-real, difference is",
+                      diff)
+                await asyncio.sleep(0.09)
+            elif diff < -5:
+                print("Input stream is lagging", diff)
+
+            relative = stream_time
+            future_ts, mark = time_machine.get_timemark(relative,
+                                                        self.audio_config.latency_s)
+
+            if self.chunk_queue is not None:
+                item = (future_ts, chunk)
                 self.chunk_queue.chunk_list.append((self.chunk_queue.CMD_AUDIO,
                                                     item))
                 self.chunk_queue.chunk_available.set()
@@ -116,7 +128,7 @@ class Packetizer:
                     dgram = Packetizer.HEADER_RAW_AUDIO + mark + chunk
                     cancelled_compressions += 1
             else:
-                dgram = b'\x00\x00' + mark + chunk
+                dgram = Packetizer.HEADER_RAW_AUDIO + mark + chunk
 
             dgram_len = len(dgram)
             chunk_no += 1
@@ -169,3 +181,4 @@ class Packetizer:
                 recent_start = now
                 recent_bytes = 0
                 recent = 0
+        print("- Packetizer stop")
