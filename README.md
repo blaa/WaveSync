@@ -3,10 +3,12 @@ Wavesync
 
 The goal is achieving a perfectly synchronised multi-room playback over the local
 area networks (Ethernet or Wi-Fi) using cheap components and no additional
-cables. Main features:
-- Receives a "combined" audio stream from PulseAudio over a Unix socket,
+cables.
+
+Main features:
+- Wavesync receives a "combined" audio stream from PulseAudio over a Unix socket,
 - chunks the audio, labels with timestamp and transmits over the network,
-- then gathers audio on receivers and plays it using PyAudio (direct ALSA, or
+- then gathers chunks on receivers and plays it using PyAudio (direct ALSA, or
   PulseAudio output).
 - It's relatively trivial to setup and doesn't have exotic dependencies.
 
@@ -30,22 +32,37 @@ Configuration
   - python3
   - python3-pip
   - python3-pyaudio
-  - pulseaudio (on sender)
-  - ntp
-  - ntpstat
+  - pulseaudio (on the sender)
+  - ntp (network time protocol) or ptp (precision time protocol)
+  - option: ntpstat
 
-1. Make sure NTP works correctly with ntpstat or ntptime:
+1. Make sure the clocks are locally synchronised.
 
+  Local error should not exceed 20ms and easily can be as low as 5ms with
+  constantly working ntp daemon.
+
+  It's best to designate one local machine as the time server (for eg. the
+  wavesync transmitter) and synchronise all machines to it.
+
+  Make sure the NTP works and give it some time to synchronise... time.
+  Check setup using ntpstat, ntptime or ntpq:
   ```
-  # ntpstat
-  synchronised to NTP server (x.y.z.w) at stratum 3
-     time correct to within 31 ms
-     polling server every 1024 s
+  # ntptime
+  ntp_gettime() returns code 0 (OK)
+    time e006e2b9.b28c154c  Thu, Feb  7 2019 18:00:41.697, (.697450881),
+    maximum error 494044 us, estimated error 433 us, TAI offset 37
+  ntp_adjtime() returns code 0 (OK)
+    modes 0x0 (),
+    offset 292.294 us, frequency 12.553 ppm, interval 1 s,
+    maximum error 494044 us, estimated error 433 us,
+    status 0x2001 (PLL,NANO),
+    time constant 10, precision 0.001 us, tolerance 500 ppm,
   ```
+  We can see the NTP works. 433us of estimated error seems to be a good value (works anyway).
 
-  Values 100-150ms seem to be OK with my setup. Anything much higher might cause
-  problems. Crucial is the time difference between the receivers. < 20ms or
-  better should be achievable locally.
+  Crucial is the time difference between the receivers. < 20ms or better should
+  be achievable locally. Absolute synchronisation with the world, doesn't
+  matter.
 
 2. Configure PulseAudio UNIX socket source on sender. For example:
 
@@ -70,11 +87,11 @@ Configuration
 4. Run sender:
 
   ```
-  $ wavesync --tx /tmp/music.source
+  $ wavesync --tx /tmp/music.source --local-play
   ```
 
   You can use multiple --channel options, increase the total latency (--latency
-  1500) or decrease the --payload-size. Define rate, channel number and sample
+  1500) or decrease the --payload-size. Define rate (44100Hz), channel number and sample
   size (16 bit/24 bit).
 
 5. Run receivers:
@@ -96,8 +113,9 @@ Configuration
    Extended example - transmitter with a multicast and two unicast receivers.
    ```
    # Transmitter and multicast-loopback receiver (rpi3 with USB DAC):
-   tx-1 $ wavesync --tx /tmp/music.source --channel 224.0.0.57:45299 --channel 192.168.1.2:45299 --channel 192.168.1.3:45300
-   tx-1 $ wavesync --rx --channel 224.0.0.57:45299
+   tx-1 $ wavesync --tx /tmp/music.source --channel 224.0.0.57:45299 \
+                   --channel 192.168.1.2:45299 --channel 192.168.1.3:45300 \
+                   --local-play
 
    # Cabled receiver:
    rx-1 $ wavesync --rx --channel 224.0.0.57:45299
@@ -147,15 +165,14 @@ Architecture
                  +-------------+     +-------------+
 ```
 
-Sender marks audio chunks with a time equal to ``current sender time +
-system latency`` and transmits them. Receivers buffer the chunks and wait
-until their current time equals ``chunk time - sink latency``. Sink latency
-can be set differently on each receivers and allows to fine-tune the audio
-for different devices. If the chunk time is missed by more than
-``tolerance`` (in case of a too slow sink) the chunks are dropped to get back
-in sync.
+Sender marks audio chunks with a time equal to ``current stream time + system
+latency`` and transmits them. Receivers buffer the chunks and wait until their
+current time equals ``chunk time - sink latency``. Sink latency can be set
+differently on each receivers and allows to fine-tune the audio for different
+devices. If the chunk time is missed by more than ``tolerance`` (in case of a
+too slow sink) the chunks are probabilistically dropped to get back in sync.
 
-About every 1s a status packet is sent with sender time, a number of total sent
+About every 1s, a status packet is sent with sender time, a number of total sent
 packets and audio configuration. Receiver compares it to the packets received
 after the previous status and calculates the number of network-dropped packets.
 
@@ -173,11 +190,11 @@ Tolerance
 
 Wavesync gets the next chunk from the queue and calculates a delay between it's
 desired play time and the current time.
-- If the chunk play time is in future (delay > 1ms) - wait for it.
+- If the chunk play time is in future (delay > 1ms) - waits for it.
 - If the chunk is in past:
   - delay between 0 and tolerance/2 - play,
-  - delay between tolerance/2 and tolerance - drop with rising probability,
-  - delay over tolerance - drop.
+  - delay between tolerance/2 and tolerance - drop with increasing probability,
+  - delay larger than tolerance - drop.
 
 Packet format
 -------------
@@ -197,8 +214,10 @@ bytes for a 1 complete sample. Marking with time is required, but
 1420-2=1418 doesn't divide by 4 - so we can transport 1416 bytes of sample
 data at once.
 
-RAW data can be anything, but usually it's a sample stream: 16 bit values
-for left/right channels. Wavesync assumes silence is coded as zeroes.
+RAW data are audio frames. Each contains two (stereo) - or one (mono) - 16/24 bit
+samples. Wavesync assumes silence is coded as zeroes. Other than that, Wavesync
+mostly treats this data as binary blob, but makes certain it doesn't swap the
+channels.
 
 Flags:
 12345678ABCDEFGH
