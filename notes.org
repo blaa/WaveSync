@@ -17,7 +17,24 @@ Random project Notes
      than really playable. For example a player can decode a local mp3 and push
      it all into the buffer.
 
-** TODO Replace datetimes with UTC timestamps
+*** TODO Handle input overflow case
+    Packetizer will wait for the chunks to be within a time-marking window.
+
+    But how long should it wait? How many chunks in the input buffer is ok?
+    - Do a test with mpg321.
+    
+
+*** TODO Handle input underflow 
+
+*** TODO Never jump stream-time into the future.
+    Silence detection resets the time. Short silence can cause the time
+    to jump forward. 
+
+** Bugfixing
+*** TODO ctrl+s, ctrl+q on receiver causes sound artefacts
+    Fixing this can probably fix some other problems.
+
+** DONE Replace datetimes with UTC timestamps
    Handling correct datetimes seems costly and overly complicated.
 
 ** TODO [#C] Migrate most warnings to logging module.

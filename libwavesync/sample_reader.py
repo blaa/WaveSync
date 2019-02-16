@@ -64,6 +64,9 @@ class SampleReader(asyncio.Protocol):
                 if any(chunk):
                     self.silence_detect = 0
                     print("Silence - end")
+                    now = time_machine.now()
+                    if not self.stream_time or self.stream_time < now:
+                        self.stream_time = now
                 else:
                     # Still silence
                     continue
@@ -81,7 +84,6 @@ class SampleReader(asyncio.Protocol):
                     else:
                         print("Silence - start")
                         self.silence_detect = True
-                        self.stream_time = None
                         continue
 
             if self.stream_time is None:

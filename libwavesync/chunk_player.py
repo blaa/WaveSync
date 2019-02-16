@@ -149,7 +149,7 @@ class ChunkPlayer:
                     self._close_stream()
                 self._open_stream()
                 # Calculate maximum sensible delay in given configuration
-                max_delay = (200 + self.audio_config.sink_latency_ms +
+                max_delay = (2000 + self.audio_config.sink_latency_ms +
                              self.audio_config.latency_ms) / 1000
                 print("Assuming maximum chunk delay of %.2fms in this setup" % (max_delay * 1000))
                 continue
@@ -191,18 +191,18 @@ class ChunkPlayer:
                 if random.random() < prob:
                     s = "Drop chunk: q_len=%2d delay=%.1fms < 0. tolerance=%.1fms: P=%.2f"
                     s = s % (len(self.chunk_queue.chunk_list),
-                             delay, self.tolerance_ms, prob)
+                             delay * 1000, self.tolerance_ms, prob)
                     print(s)
                     self.stat_time_drops += 1
                     continue
 
-            # elif delay > max_delay:
-            #     # Probably we hanged for so long time that the time recovering
-            #     # mechanism rolled over. Recover
-            #     print("Huge recovery - delay of %.2f exceeds the max delay of %.2f" % (
-            #         delay, max_delay))
-            #     self.clear_state()
-            #     continue
+            elif delay > max_delay:
+                # Probably we hanged for so long time that the time recovering
+                # mechanism rolled over. Recover
+                print("Huge recovery - delay of %.2f exceeds the max delay of %.2f" % (
+                    delay, max_delay))
+                self.clear_state()
+                continue
 
             # If chunk is in the future - wait until it's within the tolerance
             elif delay > one_ms:
@@ -218,9 +218,9 @@ class ChunkPlayer:
                 buffer_space = self.stream.get_write_available()
                 if buffer_space < self.chunk_frames:
                     self.stat_output_delays += 1
-                    await asyncio.sleep(max(one_ms, delay))
+                    await asyncio.sleep(one_ms)
                     times += 1
-                    if times > 100:
+                    if times > 200:
                         print("Hey, the output is STUCK!")
                         await asyncio.sleep(1)
                         break
