@@ -87,6 +87,13 @@ class ChunkPlayer:
         else:
             assert self.stream is None
             self.pyaudio = pyaudio.PyAudio()
+            if self.device_index is None:
+                config = self.pyaudio.get_host_api_info_by_index(0)
+                device_index = config['defaultOutputDevice']
+                print("Using default output device index", device_index)
+            else:
+                device_index = self.device_index
+
             audio_format = (
                 pyaudio.paInt24
                 if cfg.sample == 24
@@ -97,7 +104,7 @@ class ChunkPlayer:
                                        rate=cfg.rate,
                                        format=audio_format,
                                        frames_per_buffer=frames_per_buffer,
-                                       output_device_index=self.device_index)
+                                       output_device_index=device_index)
             self.stream = stream
 
         self.chunk_frames = self.audio_config.chunk_size / cfg.frame_size

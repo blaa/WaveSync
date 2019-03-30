@@ -99,8 +99,7 @@ def args_receiver(rcv):
                      metavar="NUMBER",
                      action="store",
                      type=int,
-                     default=0,
-                     help="audio device index for playback (default 0)")
+                     help="audio device index for playback")
 
 
 def args_actions(act):
@@ -171,7 +170,7 @@ def parse():
     elif args.latency_ms >= 29000:
         parser.error("Latency shouldn't exceed 29s (in fact, it should work with latency < 5000).")
 
-    if args.device_index < 0:
+    if args.device_index is not None and args.device_index < 0:
         parser.error("Device index can't be negative")
 
     if not args.ip_list:
