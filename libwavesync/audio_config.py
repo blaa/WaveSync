@@ -9,7 +9,7 @@ class AudioConfig:
 
     Vocab:
       Sample: 1-channel 16 or 24 bit number.
-      Frame: 2 samples for stereo, 1 sample for mono.
+      Frame: 1 sample for mono, 2 for stereo, etc.
     """
 
     def __init__(self, rate, sample, channels, latency_ms, sink_latency_ms):
@@ -26,7 +26,7 @@ class AudioConfig:
         self.sink_latency_ms = sink_latency_ms
         self.sink_latency_s = sink_latency_ms / 1000.0
 
-        assert channels in [1, 2]
+        assert 1 <= channels <= 20
         assert sample in [24, 16]
 
         # Will be set later and can be decremented live, if the MTU doesn't
@@ -75,10 +75,10 @@ class AudioConfig:
 
     def __repr__(self):
         "Format for debugging"
-        s = "<AudioConfig {}Hz {}bits {} latency={}ms sink={}ms size chunk={} frame={}>"
+        s = "<AudioConfig {}Hz {}bits {}ch latency={}ms sink={}ms size chunk={} frame={}>"
         return s.format(
             self.rate, self.sample,
-            "stereo" if self.channels == 2 else "mono",
+            self.channels,
             self.latency_ms, self.sink_latency_ms,
             self.chunk_size, self.frame_size
         )
