@@ -21,7 +21,8 @@ from . import (
     ChunkPlayer,
     ChunkQueue,
     SampleReader,
-    Receiver
+    Receiver,
+    Stats
 )
 
 from .cli_args import parse
@@ -43,8 +44,9 @@ def start_tx(args, loop):
 
     if args.local_play:
         chunk_queue = ChunkQueue()
+        stats = Stats()
         player = ChunkPlayer(chunk_queue,
-                             receiver=None,
+                             stats,
                              tolerance_ms=args.tolerance_ms,
                              buffer_size=args.buffer_size,
                              device_index=args.device_index)
@@ -78,16 +80,19 @@ def start_rx(args, loop):
     # Network receiver with it's connection
     channel = args.ip_list[0]
     chunk_queue = ChunkQueue()
+    stats = Stats()
+
     receiver = Receiver(chunk_queue,
                         channel=channel,
-                        sink_latency_ms=args.sink_latency_ms)
+                        sink_latency_ms=args.sink_latency_ms,
+                        stats=stats)
 
     connection = loop.create_datagram_endpoint(lambda: receiver,
                                                family=socket.AF_INET,
                                                local_addr=channel)
 
     # Coroutine pumping audio into PA
-    player = ChunkPlayer(chunk_queue, receiver,
+    player = ChunkPlayer(chunk_queue, stats,
                          tolerance_ms=args.tolerance_ms,
                          buffer_size=args.buffer_size,
                          device_index=args.device_index)

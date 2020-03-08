@@ -15,14 +15,13 @@ class Receiver(asyncio.DatagramProtocol):
     - store in chunk list.
     """
 
-    def __init__(self, chunk_queue, channel, sink_latency_ms):
+    def __init__(self, chunk_queue, channel, sink_latency_ms, stats):
+        self.stats = stats
+
         # Store config
         self.channel = channel
 
         self.chunk_queue = chunk_queue
-
-        self.stat_network_latency = 0
-        self.stat_network_drops = 0
 
         # Audio configuration sent by transmitter
         self.audio_config = None
@@ -83,7 +82,7 @@ class Receiver(asyncio.DatagramProtocol):
 
         # Handle timestamp
         now = time_machine.now()
-        self.stat_network_latency = (now - sender_timestamp)
+        self.stats.network_latency = (now - sender_timestamp)
 
         # Handle audio configuration
         audio_config = AudioConfig(rate, sample, channels,
@@ -112,7 +111,7 @@ class Receiver(asyncio.DatagramProtocol):
         q.last_sender_chunk_no = sender_chunk_no
         q.chunk_no = 0
 
-        self.stat_network_drops += dropped
+        self.stats.network_drops += dropped
         if dropped < 0:
             print("WARNING: More pkts received than sent! "
                   "You are receiving multiple streams or duplicates.")
