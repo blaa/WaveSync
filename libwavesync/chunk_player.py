@@ -30,8 +30,6 @@ class ChunkPlayer:
         # Used to quit main loop
         self.stop = False
 
-        # Calculated sizes
-        self.frame_size = None
 
     def clear_state(self):
         "Clear player queue"
@@ -221,8 +219,87 @@ class ChunkPlayer:
         # No audio in queue
         return None
 
+    def calculate_delay(self, mark):
+        """
+        Calculate a relative playback delay for an absolute time mark.
+        """
+        buffer_space = self.audio_output.get_write_available()
+        now = time_machine.now()
+        play_time = self.audio_output.get_play_time(buffer_space, now)
+        delay = play_time - mark
+
+        print("  DELAY: d={:.2f}ms now={} play_t={} p-n={:.2f}ms inbuf={}fr {}ms".format(
+            delay*1000, now-1584456060, play_time-1584456060,
+            (play_time-now) * 1000,
+
+            self.audio_output.buffer_total - buffer_space,
+            (self.audio_output.buffer_total - buffer_space) / 44100.0 * 1000 ))
+        return delay
+
+    async def read_presynchronized(self):
+        """
+        Initial audio synchronization step.
+
+        - Read commands from the queue,
+        - play silence if queue is empty
+        - do initial synchronization when playback starts
+        - do a harsh resynchronization if playback differs too much
+        - return a chunk delay instead of the absolute "mark".
+        """
+        print("READ PRESYNCH q=", len(self.chunk_queue.chunk_list))
+        item = await self.read_commands()
+        if item is None:
+            return None
+
+        mark, chunk = item
+
+        delay = self.calculate_delay(mark)
+        # chunk delay > 0 -> too late
+        # chunk delay < 0 -> too early
+        if delay > 2 * self.audio_output.buffer_latency:
+            # Major resynch until within the tolerance.
+            print("  Too late: drop frames", delay, "buf", 2 * self.audio_output.buffer_latency*1000)
+            while True:
+                item = await self.read_commands()
+                if item is None:
+                    print("  run out of chunks")
+                    return None
+                mark, chunk = item
+                delay = self.calculate_delay(mark)
+                if delay <= self.tolerance_s:
+                    print("  OK, enough", delay)
+                    break
+                print("  DROP", delay)
+
+        elif delay < -2 * self.audio_output.buffer_latency:
+            print("  Too early: wait in silence", delay, 2 * self.audio_output.buffer_latency*1000)
+            if delay < -2:
+                print("  Way too early mark - Clocks not synchronized probably?")
+                return None
+            await self.silence_until(mark)
+            delay = self.calculate_delay(mark)
+            print("  OK", delay)
+        return delay, chunk
+
+    async def silence_until(self, mark):
+        "Asynchronuously play silence until we reach mark"
+        while True:
+            delay = self.calculate_delay(mark)
+            if delay > -self.tolerance_s:
+                print("  End of silence reached", delay)
+                break
+            self.audio_output.play_silence()
+            await asyncio.sleep(self.audio_output.config.chunk_time)
+
     async def chunk_player(self):
-        "Reads asynchronously chunks from the list and plays them"
+        """
+        Handles filling of the output buffer.
+
+        - Keep the buffer full - play silence if there's no signal to play.
+        - Do a "major" synchronization events to start playing or resynch after a network loss.
+        - Do a minor synchronization based on a long-term error average.
+        """
+
         # Initially we wait for configuration
         while not self.stop:
             await self.read_commands(block=True)
@@ -232,9 +309,23 @@ class ChunkPlayer:
         # Audio output is enabled and we have a stream configuration,
         # it can change though later.
         i = 0
+
+        delay_sum = 0
+        delay_count = 0
+        delay_avg = 0
+
+        # True if we are not playing synchronously right now and want to start
+        # in the right moment.
+        initial_recovery = False
+
+        relative = time_machine.now()
+
         while not self.stop:
             # In general case we have a chunk to add to the output buffer every
             # `chunk_time` seconds.
+
+            # Important:
+            # Keep buffer FULL, even if you'd have to wait for synchronization
 
             # New idea 1:
             # 1) Wait until we can write at least one chunk
@@ -248,54 +339,88 @@ class ChunkPlayer:
             # - During initial audio start try to sync though.
             # - This can allow PID like approach to synchro.
 
-            # Feed output buffer with as many chunks as you can.
 
-            # Save time and buffer status at the same moment
-            buffer_space = self.audio_output.get_write_available()
+            # Wait, without blocking, for a place in the output buffer. The
+            # buffer is emptied periodically in a larger chunks - rather than
+            # often in small chunks.
+
+            print()
+            print()
+            print("WAIT FOR BUF @ %.1f" % ((time_machine.now() - relative) * 1000))
+            while True:
+                available = self.audio_output.get_write_available()
+                if available > self.audio_output.chunk_frames:
+                    break
+                await asyncio.sleep(1 * self.audio_output.config.chunk_time)
+            print("WAIT DONE at %.1f: AUDIO_BUF_SPACE=%d chunks_in_queue=%d" %
+                  ((time_machine.now()-relative) * 1000,
+                  available, len(self.chunk_queue.chunk_list)))
+
+            # Some data in the buffer were moved away, what is left has to be
+            # played almost completely, mark the current time for latency
+            # calculation
             now = time_machine.now()
 
-            while True:
-                if buffer_space < self.audio_output.chunk_frames:
-                    # Too little space for a single chunk - we're done
+            # The next chunk will start playing at this, more-less, point of
+            # time.
+            play_time = self.audio_output.get_play_time(available, now)
+
+            # Fill all free space in the output buffer
+            delay = 0
+            while available > self.audio_output.chunk_frames:
+                print("  ONE CHUNK INCOMING")
+                item = await self.read_commands()
+
+                if item is None:
+                    # The audio must play.
+                    print("  Playing silence - no commands")
+                    self.audio_output.play_silence()
                     break
 
-                # We either play silence, or some chunk.
-                item = await self.read_commands()
-                if item is None:
-                    print("No commands - Silence.")
-                    frames = self.audio_output.play_silence(2 * self.audio_output.config.chunk_time)
-                    buffer_space -= frames
-                    continue
-
                 mark, chunk = item
-                i += 1
 
-                play_time = self.audio_output.get_play_time(buffer_space, now)
                 delay = play_time - mark
-                # chunk delay > 0 -> too late
-                # chunk delay < 0 -> too early
-
-                if delay > self.tolerance_s:
-                    # Too late - DROP chunk
+                print("  CHUNK PLAY DELAY IS %.2fms" % (delay * 1000))
+                print("  CHUNK PUT DELAY IS %.2fms %.2fms" % ((now - mark) * 1000,
+                                                              (time_machine.now() - mark) * 1000))
+                if delay > 3 * self.tolerance_s: # self.audio_output.buffer_latency:
+                    print("  ** RECOV; lagging - DROP frame")
                     self.stats.time_drops += 1
-                    print("DROP chunk={} delay={:.2f}ms tol={:.2f}ms bufspace={} ".format(
-                        i,
-                        delay*1000, self.tolerance_s*1000, buffer_space))
                     continue
-                if delay < -self.tolerance_s:
-                    # Too early - Wait while generating silence
-                    silence = min(-delay - self.tolerance_s / 2, 20 / 1000)
 
-                    frames = self.audio_output.play_silence(silence)
-                    print("WAIT WITH SILENCE delay={:.2f}ms, frames={}/space={} silence={:.2f}ms".format(delay*1000, frames, buffer_space, silence*1000))
-                    buffer_space -= frames
-                    # BUG FIXME: This might've blocked! TODO: WE SHOULD WAIT WITH A LOOP!
-                    # await asyncio.sleep(silence)
-                print("PLAY cnt={} buff_space={} delay={:.2f}".format(
-                    i, buffer_space, delay*100))
-                self.audio_output.write(chunk)
-                buffer_space -= len(chunk) // self.audio_output.config.frame_size
+                if delay < -3 * self.tolerance_s: # self.audio_output.buffer_latency:
+                    # Put it back. Play it later
+                    print("  ** RECOV; early - Start INITIAL")
+                    initial_recovery = True
+                    delay_sum = 0
+                    delay_count = 0
 
-            print("Waiting for output buffer", buffer_space)
-            await asyncio.sleep(6.0 * self.audio_output.config.chunk_time)
+                if initial_recovery and delay < -self.tolerance_s:
+                    print("  ** RECOV INITIAL; early - WAIT")
+                    self.chunk_queue.chunk_list.appendleft((self.chunk_queue.CMD_AUDIO, item))
+                    self.audio_output.play_silence()
+                    break
+
+                initial_recovery = False
+
+                self.audio_output.write(chunk[:-4])
+                available -= self.audio_output.chunk_frames
+
+                # TODO: Maybe unneeded?
+                play_time += self.audio_output.chunk_frames / self.audio_output.config.rate
+
+                delay_sum += delay
+                delay_count += 1
+
+            # Plan the future
+            print("PLANNING PHASE, should be low:", self.audio_output.get_write_available())
+            print("LAST CHUNK DELAY", delay * 100)
+            print("TOTAL BUFF", self.audio_output.buffer_total, self.audio_output.buffer_latency * 1000)
+            if delay_count > 10:
+                print("DELAY AVG", delay_sum/ delay_count * 1000)
+
+            # We just filled the buffer, we can sleep a bit longer initially.
+            #await asyncio.sleep(self.audio_output.buffer_latency / 3)
+            await asyncio.sleep(self.audio_output.config.chunk_time)
+
         print("- Finishing chunk player")

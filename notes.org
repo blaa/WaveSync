@@ -13,7 +13,7 @@ Random project Notes
 
 ** TODO Track stream-time instead of arrival-time.
    - Might fix desync on stream searching, jumping songs.
-   - Fill fix certain outputs when more data is pumped into input 
+   - Fill fix certain outputs when more data is pumped into input
      than really playable. For example a player can decode a local mp3 and push
      it all into the buffer.
 
@@ -22,13 +22,12 @@ Random project Notes
 
     But how long should it wait? How many chunks in the input buffer is ok?
     - Do a test with mpg321.
-    
 
-*** TODO Handle input underflow 
+*** TODO Handle input underflow
 
 *** TODO Never jump stream-time into the future.
     Silence detection resets the time. Short silence can cause the time
-    to jump forward. 
+    to jump forward.
 
 ** Bugfixing
 *** TODO ctrl+s, ctrl+q on receiver causes sound artefacts

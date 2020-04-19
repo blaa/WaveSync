@@ -35,6 +35,9 @@ class AudioOutput:
             if config.sample == 24
             else pyaudio.paInt16
         )
+
+        self.silent_frame = b'\x00' * config.frame_size
+
         self.stream = self.pyaudio.open(output=True,
                                         channels=config.channels,
                                         rate=config.rate,
@@ -45,8 +48,10 @@ class AudioOutput:
         # It seems to be twice the size we set, independently on the number of channels
         self.buffer_total = self.get_write_available()
 
-        print("BUFS", config.channels, buffer_size, self.buffer_total) # max_buffer seems twice the size; mono/stereo?
-        print("CONFIG", config, config.chunk_time)
+        self.stream_time = None
+        frame_time = 1.0 / config.rate
+        self.byte_time = frame_time / config.frame_size
+        self.buffer_latency = self.buffer_total * frame_time
 
     def __del__(self):
         if self.stream is not None:
@@ -63,7 +68,12 @@ class AudioOutput:
         return self.stream.get_write_available()
 
     def write(self, data):
-        return self.stream.write(data)
+        ret = self.stream.write(data)
+        if self.stream_time is None:
+            self.stream_time = time_machine.now()
+        else:
+            self.stream_time += self.byte_time * len(data)
+        return ret
 
     def can_write_chunk(self):
         "Can we write at least a single chunk to the buffer without blocking?"
@@ -72,36 +82,39 @@ class AudioOutput:
     def get_play_time(self, available, now):
         "What is the current play time of the chunk we would schedule now?"
         buffer_delay = (self.buffer_total - available) / self.config.rate
+        print("%d - %d = %d / %d -> %.2fms" % (
+            self.buffer_total, available,
+            self.buffer_total - available,
+            self.config.rate, buffer_delay * 1000
+            ))
+
         return now + buffer_delay + self.config.sink_latency_s
 
-    def play_silence(self, seconds):
+    def play_silence_s(self, seconds):
         """
         Play silence
         TODO: Parametrized
         """
-        chunk = self.get_silence()
+        chunk = self._get_silence()
         times = int(seconds * 1000)
-        print("Playing silence", seconds * 1000, "ms")
+        print("    Playing silence", seconds * 1000, "ms")
         self.write(chunk * times)
 
         # Return number of frames written to the buffer
         return len(chunk) // self.config.frame_size * times
 
-    def get_silence(self):
+    def play_silence(self):
+        "Fill output buffer with silence"
+        frames = self.silent_frame * self.get_write_available()
+        self.write(frames)
+
+    def _get_silence(self):
         "Generate and cache a 1ms silence chunk"
         if self.silence_cache is not None:
             return self.silence_cache
 
-        frame = (
-            b'\x00\x00\x00'
-            if self.config.sample == 24
-            else b'\x00\x00'
-        )
-        if self.config.channels == 2:
-            frame = frame * 2
-
         frames = self.config.rate // 1000 + 1
 
-        silent_chunk = frame * frames
+        silent_chunk = self.silent_frame * frames
         self.silence_cache = silent_chunk
         return silent_chunk
