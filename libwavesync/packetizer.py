@@ -6,6 +6,7 @@ import asyncio
 import socket
 import struct
 import zlib
+import ipaddress
 
 from datetime import datetime
 from time import time
@@ -29,7 +30,7 @@ class Packetizer:
         self.sock = None
         self.destinations = []
 
-    def create_socket(self, channels, ttl, multicast_loop, broadcast):
+    def create_socket(self, channels, ttl, multicast_loop, broadcast, source_address=None):
         "Create a UDP multicast socket"
         self.sock = socket.socket(socket.AF_INET,
                                   socket.SOCK_DGRAM,
@@ -37,6 +38,19 @@ class Packetizer:
         self.sock.setsockopt(socket.IPPROTO_IP,
                              socket.IP_MULTICAST_TTL,
                              ttl)
+
+        for address, port in channels:
+            if source_address and ipaddress.IPv4Address(address).is_multicast:
+                try:
+                    self.sock.setsockopt(socket.SOL_IP,
+                                         socket.IP_MULTICAST_IF,
+                                         socket.inet_aton(source_address))
+                    print("added membership, interface source address: %s, group: %s" % (source_address, address))
+                    self.sock.setsockopt(socket.SOL_IP,
+                                         socket.IP_ADD_MEMBERSHIP,
+                                         socket.inet_aton(address) + socket.inet_aton(source_address))
+                except:
+                    print("failed to add membership, interface source address: %s, group: %s. This is ok for unicast." % (source_address, address))
 
         if multicast_loop is True:
             self.sock.setsockopt(socket.IPPROTO_IP,

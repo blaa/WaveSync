@@ -64,7 +64,8 @@ def start_tx(args, loop):
     packetizer.create_socket(args.ip_list,
                              args.ttl,
                              args.multicast_loop,
-                             args.broadcast)
+                             args.broadcast,
+                             args.source_address)
 
     connection = loop.create_unix_connection(lambda: sample_reader, args.tx)
 
