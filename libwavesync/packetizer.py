@@ -60,7 +60,7 @@ class Packetizer:
     def _create_status_packet(self, chunk_no):
         "Format status packet"
         flags = Packetizer.HEADER_STATUS
-        now = datetime.utcnow().timestamp()
+        now = time()
         dgram = flags + struct.pack('dIHBBHH',
                                     now,
                                     chunk_no,

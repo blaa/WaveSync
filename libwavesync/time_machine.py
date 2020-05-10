@@ -4,7 +4,7 @@ Handle small, millisecond precision, timestamps.
 `timemark' marks a time in future - certain number of milliseconds ahead of
 the current time.
 """
-from datetime import datetime
+import time
 import struct
 
 # Max latency which can be recorded. Can be limited by cli.
@@ -53,4 +53,4 @@ def to_absolute_timestamp(relative_ts, mark):
 
 def now():
     "Current UTC timestamp"
-    return datetime.utcnow().timestamp()
+    return time.time()
