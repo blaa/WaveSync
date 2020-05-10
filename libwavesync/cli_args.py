@@ -126,6 +126,12 @@ def args_common(opt):
                      help="multicast group or a unicast address, "
                           "may be given multiple times with --tx")
 
+    opt.add_argument("--source-address",
+                     dest="source_address",
+                     metavar="SRCADDRESS",
+                     action="store",
+                     help="source address for packets, needed for proper multicast routing")
+
     opt.add_argument("--debug",
                      action="store_true",
                      help="enable debugging code")
